@@ -94,7 +94,8 @@ bash install.sh
 
 Tip: type `cd ` in Terminal and drag the folder onto the Terminal window to fill
 in the path. Keep the folder where the install ran; the service runs from it and
-your todos are stored in it.
+your todos are stored in it. The repository is called `go-todo`; the app, its
+folder, its `bin/todonow` command and its login agent keep the name TodoNow.
 
 **Developers**:
 

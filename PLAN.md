@@ -60,7 +60,7 @@ optional cross-cutting labels.
 - Settings: reminders, theme, trash retention, port, service restart/stop,
   keyboard reference; setup checklist with health checks; import/export with
   validation and a downloadable file; automatic trash expiry.
-- "Add to TodoNow" bookmarklet and `/add` popup; an optional `url` on every
+- "TodoNow" bookmarklet and `/add` popup; an optional `url` on every
   todo, shown as a link.
 - Notifications posted by a locally generated applet so they carry the TodoNow
   name and icon, with an osascript fallback.
