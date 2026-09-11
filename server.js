@@ -245,10 +245,14 @@ function decorate(todo, now = new Date()) {
   return { ...todo, overdue: isOverdue(todo, now) };
 }
 
-const VIEWS = ['all', 'open', 'inbox', 'today', 'now', 'upcoming', 'waiting', 'someday', 'unfiled', 'completed', 'trash'];
+const VIEWS = ['all', 'open', 'inbox', 'today', 'now', 'upcoming', 'waiting', 'someday', 'unfiled', 'completed', 'archived', 'trash'];
 
-function inView(todo, view, today, now) {
+// includeArchived: a folder view of an archived folder still shows its todos; everywhere else
+// todos in archived folders stay out of the way (the Archived view and the Trash list them).
+function inView(todo, view, today, now, includeArchived = false) {
   const open = !todo.completedAt && !todo.deletedAt;
+  if (view === 'archived') return !todo.deletedAt && store.isArchived(todo);
+  if (view !== 'trash' && !includeArchived && store.isArchived(todo)) return false;
   switch (view) {
     case 'all': return !todo.deletedAt;
     case 'open': return open;
@@ -288,7 +292,8 @@ function listTodos(url) {
   const view = VIEWS.includes(url.searchParams.get('view')) ? url.searchParams.get('view') : 'open';
   const folder = folders.normalizeFolder(url.searchParams.get('folder'));
   const q = url.searchParams.get('q') || '';
-  let todos = store.todos.filter((todo) => inView(todo, view, today, now));
+  const includeArchived = Boolean(folder) && store.isArchived(folder);
+  let todos = store.todos.filter((todo) => inView(todo, view, today, now, includeArchived));
   if (folder) todos = todos.filter((todo) => folders.isWithin(todo.folder, folder));
   const tag = slugTag(url.searchParams.get('tag'));
   if (tag) todos = todos.filter((todo) => (todo.tags || []).includes(tag));
@@ -305,8 +310,49 @@ function counts() {
   const out = {};
   for (const view of VIEWS) out[view] = 0;
   for (const todo of store.todos) for (const view of VIEWS) if (inView(todo, view, today, now)) out[view] += 1;
-  out.overdue = store.active.filter((todo) => isOverdue(todo, now)).length;
+  out.overdue = store.active.filter((todo) => isOverdue(todo, now) && !store.isArchived(todo)).length;
   return out;
+}
+
+// The folder tree for the sidebar and pickers. Counts leave out todos in archived folders; an
+// archived folder (or one inside an archived folder) is flagged and carries its own live count.
+function folderTree() {
+  const live = store.active.filter((todo) => !store.isArchived(todo));
+  const tree = folders.listFolders(live, store.folders);
+  const archivedLive = store.live.filter((todo) => store.isArchived(todo));
+  return tree.map((f) => {
+    const archived = store.isArchived(f.path);
+    if (!archived) return { ...f, archived: false };
+    const rec = store.findFolder(f.path);
+    return { ...f, archived: true, archivedHere: Boolean(rec && rec.archived), count: archivedLive.filter((t) => t.folder && t.folder.toLowerCase() === f.path.toLowerCase()).length, total: archivedLive.filter((t) => folders.isWithin(t.folder, f.path)).length };
+  });
+}
+
+// Defer: move the planned day forward. `until` is tomorrow, week, or YYYY-MM-DD. A deferred todo
+// leaves Now, and a Someday item becomes open again since a date is a commitment.
+function deferTodo(todo, until, now = new Date()) {
+  if (todo.completedAt || todo.deletedAt) throw new HttpError(409, 'only open todos can be deferred');
+  const day = deferDay(until, now);
+  if (todo.dueAt && localDay(new Date(todo.dueAt)) < day) throw new HttpError(400, `that is after the deadline (${localDay(new Date(todo.dueAt))})`);
+  todo.plannedDate = day;
+  todo.nowOrder = null;
+  if (todo.status === 'someday') todo.status = 'open';
+  todo.updatedAt = now.toISOString();
+  return todo;
+}
+
+function deferDay(until, now = new Date()) {
+  const value = cleanText(until, 10).toLowerCase();
+  const d = new Date(now);
+  if (!value || value === 'tomorrow') d.setDate(d.getDate() + 1);
+  else if (value === 'week' || value === 'next-week') d.setDate(d.getDate() + 7);
+  else if (value === 'month') d.setMonth(d.getMonth() + 1);
+  else {
+    const day = cleanDay(value, 'until');
+    if (day < localDay(now)) throw new HttpError(400, 'a deferral has to land on today or later');
+    return day;
+  }
+  return localDay(d);
 }
 
 function meta() {
@@ -315,7 +361,7 @@ function meta() {
     port: PORT,
     pid: process.pid,
     counts: counts(),
-    folders: folders.listFolders(store.active, store.folders),
+    folders: folderTree(),
     tags: tagCounts(),
     settings: store.settings,
     setupComplete: ['notifications', 'agent', 'bookmarklet'].every((k) => store.settings.setup && store.settings.setup[k]),
@@ -332,7 +378,7 @@ function meta() {
 
 function tagCounts() {
   const tags = new Map();
-  for (const todo of store.active) for (const tag of todo.tags || []) tags.set(tag, (tags.get(tag) || 0) + 1);
+  for (const todo of store.active) if (!store.isArchived(todo)) for (const tag of todo.tags || []) tags.set(tag, (tags.get(tag) || 0) + 1);
   return [...tags.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
@@ -427,10 +473,11 @@ async function route(req, res, url) {
   if (p === '/api/todos/bulk' && method === 'POST') {
     const body = await readJson(req);
     const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
-    const op = cleanEnum(body.op, ['trash', 'restore', 'purge', 'complete', 'reopen', 'move', 'now', 'unnow'], 'op');
+    const op = cleanEnum(body.op, ['trash', 'restore', 'purge', 'complete', 'reopen', 'move', 'now', 'unnow', 'defer'], 'op');
     if (!ids.length) throw new HttpError(400, 'ids are required');
     const folder = op === 'move' ? setFolder(body.folder) : null;
     const now = new Date();
+    const until = op === 'defer' ? deferDay(body.until, now) : null;
     const stamp = now.toISOString();
     const skipped = [];
     let changed = 0;
@@ -446,11 +493,12 @@ async function route(req, res, url) {
       else if (op === 'move') { if (todo.deletedAt) { skipped.push({ id, reason: 'in the trash' }); continue; } todo.folder = folder; todo.updatedAt = stamp; }
       else if (op === 'now') { if (todo.completedAt || todo.deletedAt) { skipped.push({ id, reason: 'not open' }); continue; } if (!Number.isFinite(todo.nowOrder)) todo.nowOrder = Date.now() + changed; todo.updatedAt = stamp; }
       else if (op === 'unnow') { todo.nowOrder = null; todo.updatedAt = stamp; }
+      else if (op === 'defer') { try { deferTodo(todo, until, now); } catch (err) { skipped.push({ id, reason: err.message }); continue; } }
       changed += 1;
     }
     if (op === 'purge' && keep.size) store.data.todos = store.todos.filter((todo) => !keep.has(todo.id));
     if (changed) store.save('todos');
-    return sendJson(res, 200, { changed, skipped, folder });
+    return sendJson(res, 200, { changed, skipped, folder, until });
   }
   if (seg[0] === 'api' && seg[1] === 'todos' && seg.length >= 3) {
     const todo = requireTodo(seg[2]);
@@ -472,6 +520,12 @@ async function route(req, res, url) {
       if (action === 'complete') { completeTodo(todo); store.save('todos'); return sendJson(res, 200, { todo: decorate(todo) }); }
       if (action === 'reopen') { todo.completedAt = null; todo.updatedAt = new Date().toISOString(); store.save('todos'); return sendJson(res, 200, { todo: decorate(todo) }); }
       if (action === 'restore') { todo.deletedAt = null; todo.updatedAt = new Date().toISOString(); store.save('todos'); return sendJson(res, 200, { todo: decorate(todo) }); }
+      if (action === 'defer') {
+        const body = await readJson(req);
+        deferTodo(todo, body.until);
+        store.save('todos');
+        return sendJson(res, 200, { todo: decorate(todo) });
+      }
       if (action === 'snooze') {
         const body = await readJson(req);
         const until = body.until ? cleanDate(body.until, 'until') : new Date(Date.now() + cleanInt(body.minutes, 'minutes', 1, 10080, 60) * 60000).toISOString();
@@ -485,14 +539,14 @@ async function route(req, res, url) {
   }
 
   // ---- folders
-  if (p === '/api/folders' && method === 'GET') return sendJson(res, 200, { folders: folders.listFolders(store.active, store.folders) });
+  if (p === '/api/folders' && method === 'GET') return sendJson(res, 200, { folders: folderTree() });
   if (p === '/api/folders' && method === 'POST') {
     const body = await readJson(req);
     const wanted = folders.normalizeFolder(body.path);
     if (!wanted) throw new HttpError(400, 'a folder path is required');
     const existed = Boolean(store.findFolder(wanted));
     const actual = setFolder(wanted);
-    return sendJson(res, existed ? 200 : 201, { folder: folders.listFolders(store.active, store.folders).find((f) => f.path === actual), existed });
+    return sendJson(res, existed ? 200 : 201, { folder: folderTree().find((f) => f.path === actual), existed });
   }
   if (p === '/api/folders/rename' && method === 'POST') {
     const body = await readJson(req);
@@ -513,6 +567,21 @@ async function route(req, res, url) {
     store.save('folders');
     if (changed) store.save('todos');
     return sendJson(res, 200, { ok: true, from, to: store.findFolder(to).path, changed });
+  }
+  if (p === '/api/folders/archive' && method === 'POST') {
+    const body = await readJson(req);
+    const target = folders.normalizeFolder(body.path);
+    if (!target || !store.findFolder(target)) throw new HttpError(404, 'no such folder');
+    const rec = store.findFolder(target);
+    const archived = body.archived == null ? !rec.archived : Boolean(body.archived);
+    if (archived) rec.archived = true; else delete rec.archived;
+    let cleared = 0;
+    if (archived) for (const todo of store.todos) if (Number.isFinite(todo.nowOrder) && folders.isWithin(todo.folder, target)) { todo.nowOrder = null; todo.updatedAt = new Date().toISOString(); cleared += 1; }
+    store.save('folders');
+    if (cleared) store.save('todos');
+    // Still inside an archived parent after unarchiving? Say so, the caller may want to unarchive that instead.
+    const parentArchived = !archived && store.isArchived(target);
+    return sendJson(res, 200, { ok: true, path: rec.path, archived, effective: store.isArchived(target), parentArchived, todos: store.live.filter((t) => folders.isWithin(t.folder, target)).length });
   }
   if (p === '/api/folders/delete' && method === 'POST') {
     const body = await readJson(req);
@@ -601,10 +670,11 @@ async function route(req, res, url) {
       for (const rec of body.folders) {
         const wanted = folders.normalizeFolder(rec && rec.path);
         if (wanted && !store.findFolder(wanted)) { store.ensureFolder(wanted); foldersAdded += 1; }
+        if (wanted && rec.archived) { const kept = store.findFolder(wanted); if (kept) kept.archived = true; }
       }
     }
     if (added.length) store.save('todos');
-    if (foldersAdded) store.save('folders');
+    if (foldersAdded || (Array.isArray(body.folders) && body.folders.some((rec) => rec && rec.archived))) store.save('folders');
     return sendJson(res, 200, { added: added.length, ids: added, skipped, foldersAdded });
   }
 
@@ -707,4 +777,4 @@ server.listen(PORT, HOST, () => {
   trashTimer.unref();
 });
 
-module.exports = { server, store, scheduler, createTodo, updateTodo, completeTodo, advance, listTodos, counts };
+module.exports = { server, store, scheduler, createTodo, updateTodo, completeTodo, deferTodo, deferDay, advance, listTodos, counts };

@@ -30,7 +30,7 @@
     try {
       const [meta, same] = await Promise.all([api('GET', '/api/meta'), url ? api('GET', '/api/todos?view=open&q=' + encodeURIComponent(url)) : { todos: [] }]);
       chips.setAll(meta.tags.map((t) => t.name));
-      folderPick.setFolders(meta.folders);
+      folderPick.setFolders(meta.folders.filter((f) => !f.archived));
       if (meta.settings && (meta.settings.theme === 'light' || meta.settings.theme === 'dark')) document.documentElement.dataset.theme = meta.settings.theme;
       const dup = same.todos.find((t) => t.url === url);
       if (dup) $('#info').innerHTML = '<div class="alert warn">An open todo already points at this page: "' + esc(dup.title) + '". Adding again makes a second one.</div>';

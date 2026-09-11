@@ -6,8 +6,8 @@
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  const VIEWS = ['all', 'inbox', 'today', 'now', 'upcoming', 'waiting', 'someday', 'unfiled', 'completed', 'trash'];
-  const VIEW_LABELS = { all: 'All todos', inbox: 'Inbox', today: 'Today', now: 'Now', upcoming: 'Upcoming', waiting: 'Waiting', someday: 'Someday', unfiled: 'Unfiled', completed: 'Completed', trash: 'Trash' };
+  const VIEWS = ['all', 'inbox', 'today', 'now', 'upcoming', 'waiting', 'someday', 'unfiled', 'completed', 'archived', 'trash'];
+  const VIEW_LABELS = { all: 'All todos', inbox: 'Inbox', today: 'Today', now: 'Now', upcoming: 'Upcoming', waiting: 'Waiting', someday: 'Someday', unfiled: 'Unfiled', completed: 'Completed', archived: 'Archived', trash: 'Trash' };
   const SETTINGS_TABS = ['general', 'setup', 'data'];
 
   const state = {
@@ -162,7 +162,7 @@
       el.innerHTML = '<div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">' +
         '<h3 id="modalTitle">' + esc(opts.title || '') + '</h3>' +
         (opts.message ? '<p class="modal-msg">' + opts.message + '</p>' : '') +
-        (withInput ? '<div class="field"><input type="text" id="modalInput" value="' + esc(opts.value || '') + '" placeholder="' + esc(opts.placeholder || '') + '" autocomplete="off" spellcheck="false"' + (opts.list ? ' list="modalList"' : '') + '>' +
+        (withInput ? '<div class="field"><input type="' + (opts.type || 'text') + '" id="modalInput" value="' + esc(opts.value || '') + '" placeholder="' + esc(opts.placeholder || '') + '" autocomplete="off" spellcheck="false"' + (opts.list ? ' list="modalList"' : '') + '>' +
           (opts.list ? '<datalist id="modalList">' + opts.list.map((v) => '<option value="' + esc(v) + '">').join('') + '</datalist>' : '') +
           (opts.help ? '<div class="help">' + opts.help + '</div>' : '') + '</div>' : '') +
         (withCheck ? '<label class="modal-check"><input type="checkbox" id="modalCheck"' + (opts.checked ? ' checked' : '') + '> ' + opts.checkbox + '</label>' : '') +
@@ -203,7 +203,7 @@
     title: 'What needs doing. Shown in every list and matched first by search.',
     folder: 'The one place this todo lives: a person, an area or a project. Use / for nesting, for example People/Alice. Typing a new path creates the folder. A folder view lists todos from its subfolders too.',
     due: 'A real deadline with a time. Todos due today or overdue show in Today, later ones in Upcoming. A notification fires before it (see Reminder).',
-    planned: 'The day you intend to work on it, without a hard deadline. Puts the todo in Today on that day.',
+    planned: 'The day you intend to work on it, without a hard deadline. Puts the todo in Today on that day. Defer on a row moves this forward in one click.',
     status: 'Open is normal. Waiting parks it until someone or something else moves (Waiting view). Someday keeps an idea without a commitment (Someday view).',
     waiting: 'Who or what you are waiting for, shown with the todo.',
     priority: 'High priority shows a red dot and sorts first among todos with the same date.',
@@ -252,7 +252,7 @@
       }
     } else renderSettingsPage(state.route.tab);
     renderSidebar();
-    $('#fab').classList.toggle('hidden', state.route.page !== 'todos' || inTrash());
+    $('#fab').classList.toggle('hidden', state.route.page !== 'todos' || !canAdd());
   }
 
   function pageTitle() {
@@ -294,6 +294,8 @@
     plus: svg('<path d="M8 3v10M3 8h10"/>'),
     link: svg('<path d="M6.5 9.5 9.5 6.5M7 4.5l1.2-1.2a2.4 2.4 0 0 1 3.4 3.4L10.4 8M9 11.5l-1.2 1.2a2.4 2.4 0 0 1-3.4-3.4L5.6 8"/>'),
     bookmark: svg('<path d="M4 2.5h8v11l-4-2.6-4 2.6z"/>'),
+    archive: svg('<path d="M2.5 3h11v3h-11zM3.5 6v6.5a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V6M6.5 9h3"/>'),
+    defer: svg('<path d="M2.5 8h8M7.5 5 10.5 8l-3 3M13.5 3.5v9"/>'),
   };
 
   function navItem(hash, label, count, ico, active, extra) {
@@ -352,10 +354,11 @@
       } else html += '<div class="side-note">No tags yet. Add them in the Tags field of a todo.</div>';
     }
 
-    html += section('done', 'Done', (c.completed || 0) + (c.trash || 0), '');
+    html += section('done', 'Done', (c.completed || 0) + (c.archived || 0) + (c.trash || 0), '');
     if (!state.collapsed.has('done')) {
       html += '<div class="nav">';
       html += navItem('#/completed', 'Completed', c.completed, NAV_ICONS.completed, viewActive('completed'));
+      if (c.archived || (m && m.folders.some((f) => f.archived))) html += navItem('#/archived', 'Archived', c.archived, NAV_ICONS.archive, viewActive('archived'));
       html += navItem('#/trash', 'Trash', c.trash, NAV_ICONS.trash, viewActive('trash'));
       html += '</div>';
     }
@@ -467,6 +470,7 @@
     const active = (state.route.folder || '').toLowerCase();
     const byParent = new Map();
     for (const n of state.meta.folders) {
+      if (n.archived) continue; // archived folders live under Done > Archived
       const key = (n.parent || '').toLowerCase();
       if (!byParent.has(key)) byParent.set(key, []);
       byParent.get(key).push(n);
@@ -495,7 +499,7 @@
     }));
   }
 
-  const folderPaths = () => (state.meta ? state.meta.folders.map((f) => f.path) : []);
+  const folderPaths = () => (state.meta ? state.meta.folders.filter((f) => !f.archived).map((f) => f.path) : []);
 
   async function createFolder(prefill) {
     const path = await dialog({ title: 'New folder', value: prefill || '', placeholder: 'People/Alice', ok: 'Create', list: folderPaths(), help: 'Use <code>/</code> for nesting, for example <code>Work/Project Alpha</code>. Missing parents are created too.' });
@@ -540,7 +544,9 @@
   // ------------------------------------------------------------------ todos view
   const inTrash = () => state.route.view === 'trash';
   const inCompleted = () => state.route.view === 'completed';
-  const canAdd = () => !inTrash() && !inCompleted();
+  const inArchived = () => state.route.view === 'archived';
+  const inArchivedFolder = () => Boolean(state.route.folder && state.meta && state.meta.folders.some((f) => f.archived && f.path.toLowerCase() === state.route.folder.toLowerCase()));
+  const canAdd = () => !inTrash() && !inCompleted() && !inArchived() && !inArchivedFolder();
 
   function renderToolbar() {
     const r = state.route;
@@ -556,7 +562,13 @@
     else html += '<span class="title">' + esc(VIEW_LABELS[r.view] || 'Todos') + '</span>';
     html += '<span>' + plural(state.total, 'todo') + (state.q ? ' match' : '') + '</span>';
     if (r.view === 'today' && !r.folder && !r.tag) html += '<span class="small muted">' + esc(new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date())) + '</span>';
-    if (r.folder) html += '<button class="btn sm ghost" id="subFolder" title="Create a folder inside this one">Subfolder</button><button class="btn sm ghost" id="renameFolder" title="Rename or move this folder">Rename</button><button class="btn sm ghost danger" id="deleteFolder" title="Delete this folder and its subfolders; todos move to the parent">Delete folder</button>';
+    const folderNode = r.folder && state.meta ? state.meta.folders.find((f) => f.path.toLowerCase() === r.folder.toLowerCase()) : null;
+    if (folderNode && folderNode.archived) html += '<span class="badge" title="' + (folderNode.archivedHere ? 'This folder is archived' : 'A parent folder is archived') + '">archived</span>';
+    if (r.folder) html += '<button class="btn sm ghost" id="subFolder" title="Create a folder inside this one">Subfolder</button><button class="btn sm ghost" id="renameFolder" title="Rename or move this folder">Rename</button>' + (folderNode && !folderNode.archived ? '<button class="btn sm ghost" id="archiveFolder" title="Finished with this project? Hide the folder and its todos from every view, count and reminder; nothing is deleted">Archive</button>' : folderNode && folderNode.archivedHere ? '<button class="btn sm ghost" id="archiveFolder" title="Bring this folder and its todos back">Unarchive</button>' : '') + '<button class="btn sm ghost danger" id="deleteFolder" title="Delete this folder and its subfolders; todos move to the parent">Delete folder</button>';
+    if (r.view === 'archived' && !r.folder) {
+      const roots = (state.meta ? state.meta.folders : []).filter((f) => f.archivedHere);
+      html += roots.length ? '<span class="small muted">Folders:</span>' + roots.map((f) => '<a class="tag-badge" href="' + folderHash(f.path) + '" title="' + esc(f.path) + '">' + FOLDER_ICO + ' ' + esc(f.path) + '<span class="n">' + f.total + '</span></a>').join('') : '<span class="small muted">Archive a folder from its toolbar when a project is finished.</span>';
+    }
     if (r.view === 'trash') {
       const days = state.meta ? state.meta.settings.trashDays || 30 : 30;
       html += '<span class="small muted">Todos here are removed for good after ' + days + ' days. Restore brings one back.</span>';
@@ -564,7 +576,7 @@
     }
     if (r.view === 'now' && state.results.length) html += '<span class="small muted">' + describeEstimate(state.results) + '</span>';
     html += '<span class="grow"></span>';
-    html += '<span class="small muted kbd-hint"><kbd>&uarr;&darr;</kbd> move <kbd>&#8629;</kbd> ' + (inTrash() ? 'open' : 'edit') + (inTrash() ? '' : ' <kbd>space</kbd> ' + (inCompleted() ? 'reopen' : 'done')) + ' <kbd>X</kbd> select' + (canAdd() ? ' <kbd>N</kbd> new' : '') + '</span>';
+    html += '<span class="small muted kbd-hint"><kbd>&uarr;&darr;</kbd> move <kbd>&#8629;</kbd> ' + (inTrash() ? 'open' : 'edit') + (inTrash() ? '' : ' <kbd>space</kbd> ' + (inCompleted() ? 'reopen' : 'done')) + ' <kbd>X</kbd> select' + (canAdd() ? ' <kbd>D</kbd> defer <kbd>N</kbd> new' : '') + '</span>';
     html += '<div class="seg"><button data-layout="list" class="' + (state.layout === 'list' ? 'on' : '') + '" title="List">&#9776; List</button><button data-layout="grid" class="' + (state.layout === 'grid' ? 'on' : '') + '" title="Grid">&#9638; Grid</button></div>';
     tb.innerHTML = html;
     $$('[data-clear]', tb).forEach((b) => (b.onclick = () => go('#/all')));
@@ -582,6 +594,23 @@
     if (rf) rf.onclick = () => renameFolder(r.folder);
     const df = $('#deleteFolder');
     if (df) df.onclick = () => deleteFolder(df, r.folder);
+    const af = $('#archiveFolder');
+    if (af) af.onclick = () => toggleArchive(r.folder, !(folderNode && folderNode.archivedHere));
+  }
+
+  async function toggleArchive(path, archived) {
+    const node = state.meta && state.meta.folders.find((f) => f.path.toLowerCase() === path.toLowerCase());
+    const n = node ? node.total : 0;
+    if (archived) {
+      const ok = await dialog({ input: false, ok: 'Archive', title: 'Archive ' + path + '?', message: 'The folder, its subfolders and ' + plural(n, 'todo') + ' leave every view, count, picker and reminder. Nothing is deleted: find them under <b>Done &gt; Archived</b> and unarchive any time.' });
+      if (!ok) return;
+    }
+    try {
+      const r = await api('POST', '/api/folders/archive', { path, archived });
+      toast(archived ? 'Archived ' + r.path + (r.todos ? ' with ' + plural(r.todos, 'todo') : '') : r.parentArchived ? 'Unarchived, but a parent folder is still archived' : 'Unarchived ' + r.path);
+      await loadMeta();
+      go(archived ? '#/archived' : folderHash(r.path));
+    } catch (err) { toast(err.message, 4000); }
   }
 
   function describeEstimate(todos) {
@@ -640,6 +669,7 @@
       html += '<button class="btn sm ghost danger" data-bulk="trash" title="Move the selected todos to the trash">Delete</button>';
     } else {
       html += '<button class="btn sm primary" data-bulk="complete" title="Mark the selected todos done">Complete</button>';
+      html += '<button class="btn sm" data-bulk="defer" title="Plan the selected todos for a later day">Defer</button>';
       html += '<button class="btn sm" data-bulk="move" title="Move the selected todos to a folder">Move to folder</button>';
       html += '<button class="btn sm" data-bulk="' + (state.route.view === 'now' ? 'unnow' : 'now') + '" title="' + (state.route.view === 'now' ? 'Take the selected todos out of Now' : 'Add the selected todos to Now') + '">' + (state.route.view === 'now' ? 'Remove from Now' : 'Add to Now') + '</button>';
       html += '<button class="btn sm ghost danger" data-bulk="trash" title="Move the selected todos to the trash">Delete</button>';
@@ -665,6 +695,10 @@
     } else if (op === 'purge') {
       const ok = await dialog({ input: false, danger: true, ok: 'Delete forever', title: 'Delete ' + plural(n, 'todo') + ' permanently?', message: 'This cannot be undone.' });
       if (!ok) return;
+    } else if (op === 'defer') {
+      const until = await deferMenu(button, null);
+      if (!until) return;
+      body.until = until;
     }
     if (button) button.disabled = true;
     try {
@@ -679,6 +713,7 @@
         : op === 'restore' ? 'Restored ' + plural(r.changed, 'todo')
         : op === 'purge' ? 'Deleted ' + plural(r.changed, 'todo') + ' permanently'
         : op === 'now' ? 'Added ' + plural(r.changed, 'todo') + ' to Now'
+        : op === 'defer' ? 'Deferred ' + plural(r.changed, 'todo') + ' to ' + dayLabel(r.until)
         : 'Removed ' + plural(r.changed, 'todo') + ' from Now';
       clearSelection(false);
       toast(msg + skipped, undo ? 7000 : 3000, undo);
@@ -762,7 +797,7 @@
   function rowActions(t) {
     if (inTrash()) return '<div class="acts"><button class="btn sm primary" data-restore title="Bring this todo back">Restore</button><button class="btn sm ghost danger" data-purge title="Remove permanently (click twice)">Delete forever</button></div>';
     if (t.completedAt) return '<div class="acts"><button class="btn sm" data-reopen title="Mark open again">Reopen</button><button class="btn sm ghost" data-edit title="Edit (E)">Edit</button><button class="btn sm ghost danger" data-del title="Move to the trash (click twice)">Delete</button></div>';
-    return '<div class="acts"><button class="btn sm" data-edit title="Edit (E)">Edit</button>' + (Number.isFinite(t.nowOrder) ? '<button class="btn sm ghost" data-unnow title="Take out of Now">Unfocus</button>' : '<button class="btn sm ghost" data-now title="Add to Now">Now</button>') + '<button class="btn sm ghost danger" data-del title="Move to the trash (click twice)">Delete</button></div>';
+    return '<div class="acts"><button class="btn sm" data-edit title="Edit (E)">Edit</button><button class="btn sm ghost" data-defer title="Plan it for a later day (D)">Defer</button>' + (Number.isFinite(t.nowOrder) ? '<button class="btn sm ghost" data-unnow title="Take out of Now">Unfocus</button>' : '<button class="btn sm ghost" data-now title="Add to Now">Now</button>') + '<button class="btn sm ghost danger" data-del title="Move to the trash (click twice)">Delete</button></div>';
   }
 
   const pickBox = (t) => '<span class="pick" data-pick role="checkbox" aria-checked="' + state.sel.has(t.id) + '" title="Select (X). Shift+click selects a range"></span>';
@@ -780,13 +815,14 @@
     const c = $('#content');
     const r = state.route;
     if (!state.results.length) {
-      c.innerHTML = quickHtml() + '<div class="empty"><b>' + (state.q ? 'No matches for "' + esc(state.q) + '"' : r.view === 'trash' ? 'The trash is empty' : r.view === 'completed' ? 'Nothing completed yet' : r.view === 'today' ? 'Nothing planned for today' : r.view === 'now' ? 'Now is empty' : r.view === 'inbox' ? 'Inbox zero' : r.folder ? 'Empty folder' : 'Nothing here yet') + '</b>' +
+      c.innerHTML = quickHtml() + '<div class="empty"><b>' + (state.q ? 'No matches for "' + esc(state.q) + '"' : r.view === 'trash' ? 'The trash is empty' : r.view === 'completed' ? 'Nothing completed yet' : r.view === 'today' ? 'Nothing planned for today' : r.view === 'now' ? 'Now is empty' : r.view === 'inbox' ? 'Inbox zero' : r.view === 'archived' ? 'Nothing archived' : r.folder ? 'Empty folder' : 'Nothing here yet') + '</b>' +
         (state.q ? 'Try fewer words, or operators like <code>in:People</code>, <code>tag:phone</code>, <code>due:today</code>, <code>is:overdue</code>, <code>priority:high</code>.'
           : r.view === 'trash' ? 'Deleted todos wait here for ' + (state.meta ? state.meta.settings.trashDays || 30 : 30) + ' days before they are removed for good.'
           : r.view === 'completed' ? 'Finished todos show up here, newest first.'
           : r.view === 'today' ? 'Todos due or planned for today, and anything overdue, land here. Add one above or set a date on an existing todo.'
           : r.view === 'now' ? 'Pull a few todos in with the Now button on a row, or the Focus box when editing, to build a short queue for your current focus.'
           : r.view === 'inbox' ? 'New todos without a folder, date or status wait here until you file them.'
+          : r.view === 'archived' ? 'When a project is finished, open its folder and click Archive in the toolbar. Its todos move here, out of every view and count, and come back with Unarchive.'
           : r.folder ? 'Add a todo above, or drag one onto this folder in the sidebar.'
           : 'Add a todo above, or press <kbd>N</kbd> for the full form.') +
         '</div>';
@@ -878,6 +914,7 @@
     if (e.target.closest('[data-done]')) { toggleDone(t); return; }
     if (e.target.closest('[data-edit]')) { openDrawer(t); return; }
     if (e.target.closest('[data-reopen]')) { toggleDone(t); return; }
+    if (e.target.closest('[data-defer]')) { deferTodo(t, e.target.closest('[data-defer]')); return; }
     if (e.target.closest('[data-now]')) { setNow(t, true); return; }
     if (e.target.closest('[data-unnow]')) { setNow(t, false); return; }
     const del = e.target.closest('[data-del]');
@@ -903,6 +940,51 @@
       replaceResult(r.todo);
       if (completing) toast('Completed "' + t.title + '"' + (t.recurrence ? ', next one filed' : ''), 6000, { label: 'Undo', onClick: () => api('POST', '/api/todos/' + t.id + '/reopen').then(refreshAll).catch((err) => toast(err.message, 4000)) });
       else toast('Reopened');
+      await refreshAll();
+    } catch (err) { toast(err.message, 4000); }
+  }
+
+  // A small menu anchored to a button: Tomorrow, Next week, or a date. Resolves with the value
+  // for the API (tomorrow | week | YYYY-MM-DD) or null. With a todo, its deadline caps the choices.
+  function deferMenu(anchor, todo) {
+    return new Promise((resolve) => {
+      $$('.popmenu').forEach((m) => m.remove());
+      const menu = document.createElement('div');
+      menu.className = 'popmenu';
+      menu.setAttribute('role', 'menu');
+      const dueDay = todo && todo.dueAt ? dayKey(new Date(todo.dueAt)) : null;
+      const items = [['tomorrow', 'Tomorrow', shiftDay(1)], ['week', 'Next week', shiftDay(7)], ['pick', 'Pick a date', null]];
+      menu.innerHTML = items.map(([v, label, day]) => '<button type="button" class="popitem" data-v="' + v + '"' + (dueDay && day && day > dueDay ? ' disabled title="After the deadline"' : '') + '>' + label + (day ? '<span class="n">' + esc(dayLabel(day)) + '</span>' : '') + '</button>').join('');
+      document.body.appendChild(menu);
+      const r = anchor ? anchor.getBoundingClientRect() : { left: window.innerWidth / 2 - 90, bottom: window.innerHeight / 2 };
+      menu.style.left = Math.max(8, Math.min(window.innerWidth - menu.offsetWidth - 8, r.left)) + 'px';
+      menu.style.top = (r.bottom + 4 + menu.offsetHeight > window.innerHeight ? r.top - menu.offsetHeight - 4 : r.bottom + 4) + 'px';
+      const done = (v) => { menu.remove(); document.removeEventListener('mousedown', outside, true); document.removeEventListener('keydown', keys, true); resolve(v); };
+      const outside = (e) => { if (!menu.contains(e.target)) done(null); };
+      const keys = (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } };
+      document.addEventListener('mousedown', outside, true);
+      document.addEventListener('keydown', keys, true);
+      menu.onclick = async (e) => {
+        const b = e.target.closest('[data-v]');
+        if (!b || b.disabled) return;
+        if (b.dataset.v !== 'pick') return done(b.dataset.v);
+        menu.remove(); document.removeEventListener('mousedown', outside, true); document.removeEventListener('keydown', keys, true);
+        const day = await dialog({ title: 'Defer until', type: 'date', value: shiftDay(2), ok: 'Defer', help: dueDay ? 'The deadline is ' + esc(dayLabel(dueDay)) + '; the planned day has to be on or before it.' : 'The todo shows in Today on that day.' });
+        resolve(day || null);
+      };
+      const first = menu.querySelector('.popitem:not([disabled])');
+      if (first) first.focus();
+    });
+  }
+
+  async function deferTodo(t, anchor) {
+    const until = await deferMenu(anchor, t);
+    if (!until) return;
+    const before = { plannedDate: t.plannedDate || null, nowOrder: Number.isFinite(t.nowOrder) ? t.nowOrder : null, status: t.status };
+    try {
+      const r = await api('POST', '/api/todos/' + t.id + '/defer', { until });
+      replaceResult(r.todo);
+      toast('Deferred to ' + dayLabel(r.todo.plannedDate), 6000, { label: 'Undo', onClick: () => api('PUT', '/api/todos/' + t.id, before).then(refreshAll).catch((err) => toast(err.message, 4000)) });
       await refreshAll();
     } catch (err) { toast(err.message, 4000); }
   }
@@ -1083,6 +1165,7 @@
       if (e.key === ' ') { e.preventDefault(); const t = selectedTodo(); if (t && !t.deletedAt) toggleDone(t); }
       else if (e.key === 'e') { e.preventDefault(); const t = selectedTodo(); if (t) openDrawer(t); }
       else if (e.key === 'x') { e.preventDefault(); if (state.results.length) togglePick(state.selected, e.shiftKey); }
+      else if (e.key === 'd') { e.preventDefault(); const t = selectedTodo(); if (t && !t.completedAt && !t.deletedAt) deferTodo(t, $('[data-i="' + state.selected + '"] [data-defer]')); }
       else if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
       else if (e.key === 'l') { state.layout = state.layout === 'list' ? 'grid' : 'list'; try { localStorage.setItem('todonow.layout', state.layout); } catch { /* ignore */ } renderResults(); renderToolbar(); }
       else if (e.key === 'n' && canAdd()) { e.preventDefault(); openDrawer(null); }
@@ -1153,7 +1236,7 @@
     if (trashed) $$('#drawer input, #drawer textarea, #drawer select').forEach((el) => { el.disabled = true; });
     drawerChips = chipEditor($('#fTags'), { values: t.tags || [], all: state.meta ? state.meta.tags.map((x) => x.name) : [] });
     if (drawerFolder) drawerFolder.destroy();
-    drawerFolder = folderPicker($('#fFolder'), { value: t.folder || '', folders: state.meta ? state.meta.folders : [] });
+    drawerFolder = folderPicker($('#fFolder'), { value: t.folder || '', folders: state.meta ? state.meta.folders.filter((f) => !f.archived || f.path === t.folder) : [] });
     if (trashed) drawerFolder.input.disabled = true;
     // Waiting for only matters with the Waiting status; the field hints at that.
     const status = $('#fStatus'), waiting = $('#fWaiting');
@@ -1372,6 +1455,7 @@
       '<span><kbd>N</kbd></span><span>New todo with the full form</span>' +
       '<span><kbd>&uarr;</kbd> <kbd>&darr;</kbd> <kbd>&#8629;</kbd></span><span>Move between todos and open one</span>' +
       '<span><kbd>space</kbd></span><span>Complete or reopen the highlighted todo</span>' +
+      '<span><kbd>D</kbd></span><span>Defer the highlighted todo: tomorrow, next week or a date. Also on every row and in the bulk toolbar.</span>' +
       '<span><kbd>X</kbd> <kbd>&#8984;A</kbd></span><span>Select for a bulk action (Shift+click for a range), select all</span>' +
       '<span><kbd>L</kbd></span><span>Switch between list and grid</span>' +
       '<span><kbd>&#8984;S</kbd> <kbd>esc</kbd></span><span>Save or close the edit drawer</span>' +

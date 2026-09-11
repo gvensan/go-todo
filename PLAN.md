@@ -13,7 +13,8 @@ optional cross-cutting labels.
 1. Capture a title into Inbox or the current context (quick-add line, N, CLI).
 2. Give it a folder, deadline, or planning date when those are useful.
 3. Pull a small number of todos into Now and use Today for daily planning.
-4. Complete, defer, wait, or move the todo without losing its history.
+4. Complete, defer (tomorrow, next week, a date), wait, or move the todo
+   without losing its history; archive a folder when its project is done.
 5. Let the daily digest and deadline notifications resurface important work.
 
 ## Technical constraints
@@ -41,8 +42,13 @@ optional cross-cutting labels.
   and folders, folder picker in the drawer.
 - Views: All, Inbox, Today, Now, Upcoming, Waiting, Someday, Unfiled,
   Completed, Trash, plus folder and tag views. List or grid.
-- Bulk select (hover checkbox, Shift+click, X, ⌘A) with complete, move, Now,
-  delete, restore, purge, and Undo.
+- Defer on rows, in bulk, by keyboard and CLI: moves the planned day, leaves
+  Now, respects the deadline.
+- Folder archiving: a finished project leaves every view, count, picker and
+  reminder; Done > Archived lists it; unarchive restores it. No per-todo
+  archive (Someday, Completed and Trash cover that).
+- Bulk select (hover checkbox, Shift+click, X, ⌘A) with complete, defer, move,
+  Now, delete, restore, purge, and Undo.
 - Daily, deadline, per-todo, snooze, quiet-hours and test notifications;
   reminder ledger; `bin/todonow remind`.
 - Search with operators and highlighted terms.

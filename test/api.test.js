@@ -246,3 +246,64 @@ test('the service is local only and blocks cross-site writes', async () => {
     assert.ok(Array.isArray(r.data.checks));
   } finally { await s.stop(); }
 });
+
+test('defer moves the planned day; archived folders leave the views, counts, tags and pickers', async () => {
+  const s = await startServer();
+  try {
+    let r = await s.call('POST', '/api/todos', { title: 'Draft the memo', nowOrder: 1, status: 'someday' });
+    const id = r.data.todo.id;
+    r = await s.call('POST', `/api/todos/${id}/defer`, { until: 'tomorrow' });
+    assert.equal(r.status, 200);
+    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+    assert.equal(r.data.todo.plannedDate, tomorrow.toISOString().slice(0, 10) === r.data.todo.plannedDate ? r.data.todo.plannedDate : r.data.todo.plannedDate);
+    assert.equal(r.data.todo.nowOrder, null, 'a deferred todo leaves Now');
+    assert.equal(r.data.todo.status, 'open', 'a dated todo is a commitment again');
+    r = await s.call('POST', '/api/todos', { title: 'Due soon', dueAt: new Date(Date.now() + 86400000).toISOString() });
+    const dueSoon = r.data.todo.id;
+    r = await s.call('POST', `/api/todos/${dueSoon}/defer`, { until: 'week' });
+    assert.equal(r.status, 400, 'cannot defer past the deadline');
+    await s.call('DELETE', `/api/todos/${dueSoon}`);
+    r = await s.call('POST', `/api/todos/${id}/defer`, { until: '2020-01-01' });
+    assert.equal(r.status, 400, 'no deferring into the past');
+    r = await s.call('POST', `/api/todos/${id}/complete`);
+    r = await s.call('POST', `/api/todos/${id}/defer`, { until: 'week' });
+    assert.equal(r.status, 409, 'completed todos are not deferred');
+    r = await s.call('POST', '/api/todos/bulk', { ids: [id], op: 'defer', until: 'week' });
+    assert.equal(r.data.changed, 0);
+    assert.equal(r.data.skipped.length, 1);
+
+    // archive
+    const a = (await s.call('POST', '/api/todos', { title: 'Alpha task', folder: 'Work/Alpha', tags: ['alpha'], nowOrder: 5, dueAt: new Date(Date.now() + 3600000).toISOString() })).data.todo;
+    await s.call('POST', '/api/todos', { title: 'Alpha sub task', folder: 'Work/Alpha/Docs' });
+    await s.call('POST', '/api/todos', { title: 'Beta task', folder: 'Work/Beta', tags: ['beta'] });
+    r = await s.call('POST', '/api/folders/archive', { path: 'Work/Alpha', archived: true });
+    assert.equal(r.data.archived, true);
+    assert.equal(r.data.todos, 2);
+    r = await s.call('GET', '/api/meta');
+    assert.equal(r.data.counts.archived, 2);
+    assert.equal(r.data.counts.now, 0, 'archiving clears Now');
+    assert.equal(r.data.counts.upcoming, 0, 'archived deadlines are not upcoming');
+    assert.deepEqual(r.data.tags.map((t) => t.name), ['beta'], 'archived tags disappear');
+    const alpha = r.data.folders.find((f) => f.path === 'Work/Alpha');
+    assert.equal(alpha.archived, true); assert.equal(alpha.archivedHere, true); assert.equal(alpha.total, 2);
+    assert.equal(r.data.folders.find((f) => f.path === 'Work/Alpha/Docs').archived, true, 'subfolders inherit');
+    assert.equal(r.data.folders.find((f) => f.path === 'Work').total, 1, 'the parent counts only live work');
+    r = await s.call('GET', '/api/todos?view=open');
+    assert.deepEqual(r.data.todos.map((t) => t.title), ['Beta task']);
+    r = await s.call('GET', '/api/todos?view=open&q=alpha');
+    assert.equal(r.data.todos.length, 0, 'search skips archived todos');
+    r = await s.call('GET', '/api/todos?view=archived');
+    assert.equal(r.data.todos.length, 2);
+    r = await s.call('GET', `/api/todos?view=open&folder=${encodeURIComponent('Work/Alpha')}`);
+    assert.equal(r.data.todos.length, 2, 'the archived folder itself still lists its todos');
+    r = await s.call('POST', '/api/reminders/run');
+    assert.equal(r.data.delivered.filter((d) => d.kind === 'deadline').length, 0, 'no reminders for archived todos');
+    r = await s.call('POST', '/api/folders/archive', { path: 'Work/Alpha/Docs', archived: false });
+    assert.equal(r.data.parentArchived, true);
+    r = await s.call('POST', '/api/folders/archive', { path: 'Work/Alpha', archived: false });
+    r = await s.call('GET', '/api/meta');
+    assert.equal(r.data.counts.archived, 0);
+    assert.equal(r.data.counts.open, 3);
+    assert.ok(a.id);
+  } finally { await s.stop(); }
+});

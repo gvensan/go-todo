@@ -462,6 +462,13 @@ main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
 .fpick-empty { padding: 10px 10px; font-size: 12.5px; color: var(--muted); white-space: normal; }
 .fpick-empty code { font-size: 11.5px; }
 
+/* small anchored menu (Defer) */
+.popmenu { position: fixed; z-index: 85; min-width: 200px; padding: 4px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); }
+.popitem { display: flex; align-items: center; gap: 12px; width: 100%; padding: 7px 10px; border: 0; border-radius: 6px; background: none; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; }
+.popitem:hover, .popitem:focus { background: var(--hover); outline: none; }
+.popitem:disabled { opacity: 0.45; cursor: default; }
+.popitem .n { margin-left: auto; color: var(--muted); font-size: 11.5px; }
+
 /* alerts */
 .alert { padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); font-size: 13px; margin: 10px 0; }
 .alert.warn { border-color: var(--warn); background: var(--warn-soft); }

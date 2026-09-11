@@ -294,6 +294,8 @@ case "${1:-}" in
   inbox) api GET "/api/todos?view=inbox" | print_todos ;;
   search) shift; q="$*"; api GET "/api/todos?view=open&q=$("$(node_bin)" -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$q")" | print_todos ;;
   done) [ -n "${2:-}" ] || { red "usage: todonow done ID"; exit 1; }; api POST "/api/todos/$2/complete" >/dev/null; green "completed $2" ;;
+  defer) [ -n "${2:-}" ] || { red "usage: todonow defer ID [tomorrow|week|YYYY-MM-DD]"; exit 1; }; api POST "/api/todos/$2/defer" "{\"until\":$(json_string "${3:-tomorrow}")}" | "$(node_bin)" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const t=JSON.parse(s).todo;console.log(`deferred [${t.id}] ${t.title} to ${t.plannedDate}`)})' ;;
+  archive|unarchive) [ -n "${2:-}" ] || { red "usage: todonow $1 \"Folder/Path\""; exit 1; }; flag=true; [ "$1" = unarchive ] && flag=false; api POST /api/folders/archive "{\"path\":$(json_string "$2"),\"archived\":$flag}" | "$(node_bin)" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s);console.log(`${r.archived?"archived":"unarchived"} ${r.path} (${r.todos} todos)${r.parentArchived?" but a parent folder is still archived":""}`)})' ;;
   remind) api POST /api/reminders/run | "$(node_bin)" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s);console.log(r.delivered.length?r.delivered.map(d=>d.kind+": "+d.message).join("\n"):"nothing due right now")})' ;;
   *)
     cat <<USAGE
@@ -314,6 +316,8 @@ usage: todonow <command>
   today | now | inbox     list the todos in that view
   search QUERY            search open todos (operators: in: tag: due: is: priority:)
   done ID                 complete a todo
+  defer ID [when]         plan a todo for tomorrow (default), week, or a date
+  archive | unarchive "Folder"   hide a finished project from every view, or bring it back
   remind                  deliver any reminders that are due right now
 USAGE
     ;;
