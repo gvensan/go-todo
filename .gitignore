@@ -1,0 +1,13 @@
+logs/
+node_modules/
+.DS_Store
+
+# Personal data lives here but is not part of the shared code.
+data/*
+!data/defaults/
+!data/defaults/**
+bin/node
+bin/TodoNow.app
+
+# Demo recording scripts and seed data stay local
+docs/demo/

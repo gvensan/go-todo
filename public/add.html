@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+<title>Add to TodoNow</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<style>
+  html, body { height: auto; }
+  body { padding: 16px 18px 0; background: var(--panel); }
+  /* Actions stay visible at the bottom however small the popup is; the form scrolls above them. */
+  #form .actions {
+    position: sticky; bottom: 0; z-index: 5; margin: 12px -18px 0; padding: 10px 18px 12px;
+    background: var(--panel); border-top: 1px solid var(--border);
+  }
+  #notes { min-height: 70px; }
+  h1 { font-size: 16px; display: flex; align-items: center; gap: 8px; }
+  h1 img { width: 20px; height: 20px; }
+  .url { font-size: 12px; color: var(--muted); word-break: break-all; margin: -2px 0 8px; }
+  .saved { text-align: center; padding: 60px 10px; }
+  .saved b { font-size: 18px; display: block; margin-bottom: 8px; }
+  .quick-dates { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="form">
+  <h1><img src="/favicon.svg" alt=""> Add to TodoNow</h1>
+  <div class="url" id="url"></div>
+  <div id="info"></div>
+  <div class="field"><label>Title<span class="info" tabindex="0" data-tip="What needs doing. Defaults to the page title; rewrite it as an action, for example Read or Reply.">i</span></label><input type="text" id="title"></div>
+  <div class="field"><label>Folder<span class="info" tabindex="0" data-tip="The one place this todo lives: a person, an area or a project. Use / for nesting. Typing a new path creates the folder.">i</span></label><div id="folder"></div></div>
+  <div class="row2">
+    <div class="field"><label>Deadline<span class="info" tabindex="0" data-tip="A real deadline with a time. Shows in Today when due and in Upcoming before that; a notification fires beforehand.">i</span></label><input type="datetime-local" id="due"></div>
+    <div class="field"><label>Plan for<span class="info" tabindex="0" data-tip="The day you intend to work on it. Puts the todo in Today on that day.">i</span></label><input type="date" id="planned"><div class="quick-dates"><button type="button" class="chip soft suggest" data-plan="0">today</button><button type="button" class="chip soft suggest" data-plan="1">tomorrow</button><button type="button" class="chip soft suggest" data-plan="7">next week</button></div></div>
+  </div>
+  <div class="row2">
+    <div class="field"><label>Priority</label><select id="priority"><option value="none">None</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+    <div class="field"><label>Status</label><select id="status"><option value="open">Open</option><option value="waiting">Waiting</option><option value="someday">Someday</option></select></div>
+  </div>
+  <div class="field"><label>Tags<span class="info" tabindex="0" data-tip="Optional cross-cutting labels. Type a tag and press Enter or comma.">i</span></label><div id="tags"></div></div>
+  <div class="field"><label>Notes<span class="info" tabindex="0" data-tip="The text you had selected on the page lands here.">i</span></label><textarea id="notes"></textarea></div>
+  <div class="field checks"><label><input type="checkbox" id="now"> Add to Now, my current focus queue</label></div>
+  <div class="actions">
+    <button class="btn primary" id="save">Add todo <kbd>&#8984;&#8629;</kbd></button>
+    <button class="btn" id="cancel">Cancel</button>
+    <span id="status-line" class="small muted"></span>
+  </div>
+</div>
+<div id="saved" class="saved hidden"></div>
+<script src="/chips.js"></script>
+<script src="/folderpick.js"></script>
+<script src="/add.js"></script>
+</body>
+</html>

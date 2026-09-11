@@ -1,0 +1,10 @@
+{
+  "port": 7778,
+  "theme": "system",
+  "weekStartsOn": 1,
+  "trashDays": 30,
+  "dailyReminder": { "enabled": true, "time": "09:00" },
+  "deadlineReminder": { "enabled": true, "minutesBefore": 60 },
+  "quietHours": { "enabled": false, "start": "22:00", "end": "07:00" },
+  "setup": {}
+}

@@ -1,0 +1,320 @@
+#!/bin/bash
+# todonow: control the TodoNow service (a launchd login agent) and talk to it from Terminal.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LABEL="dev.todonow"
+AGENTS="$HOME/Library/LaunchAgents"
+PLIST="$AGENTS/$LABEL.plist"
+DOMAIN="gui/$(id -u)"
+NODE_LINK="$ROOT/bin/node"
+STABLE_LINK="$HOME/.todonow"
+TODONOW_HOME="${TODONOW_HOME:-$ROOT}"
+MIN_NODE=18
+
+red() { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+dim() { printf '\033[2m%s\033[0m\n' "$*"; }
+
+port() {
+  if [ -f "$TODONOW_HOME/data/settings.json" ]; then
+    sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$TODONOW_HOME/data/settings.json" | head -1
+  fi
+}
+PORT="${TODONOW_PORT:-$(port)}"
+PORT="${PORT:-7778}"
+BASE="http://127.0.0.1:$PORT"
+
+node_major() { "$1" --version 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p'; }
+
+find_node() {
+  # Order: nvm default alias, newest nvm node, Volta, Homebrew, PATH. Must be >= MIN_NODE.
+  local nvm_dir="${NVM_DIR:-$HOME/.nvm}" cand=() alias v
+  if [ -f "$nvm_dir/alias/default" ]; then
+    alias="$(cat "$nvm_dir/alias/default")"
+    v="$(ls "$nvm_dir/versions/node" 2>/dev/null | grep -E "^v?${alias#v}" | sort -V | tail -1 || true)"
+    [ -n "$v" ] && cand+=("$nvm_dir/versions/node/$v/bin/node")
+  fi
+  if [ -d "$nvm_dir/versions/node" ]; then
+    v="$(ls "$nvm_dir/versions/node" | sort -V | tail -1)"
+    [ -n "$v" ] && cand+=("$nvm_dir/versions/node/$v/bin/node")
+  fi
+  cand+=("$HOME/.volta/bin/node" "/opt/homebrew/bin/node" "/usr/local/bin/node")
+  if command -v node >/dev/null 2>&1; then cand+=("$(command -v node)"); fi
+  local c m
+  for c in "${cand[@]}"; do
+    [ -x "$c" ] || continue
+    m="$(node_major "$c")"
+    if [ -n "$m" ] && [ "$m" -ge "$MIN_NODE" ]; then echo "$c"; return; fi
+  done
+  red "Node $MIN_NODE or newer was not found."
+  cat >&2 <<MSG
+TodoNow needs Node.js. The easiest way to get it:
+  1. Open https://nodejs.org and click the "Download Node.js (LTS)" button.
+  2. Open the downloaded .pkg and click through the installer.
+  3. Run this command again.
+Developers can use nvm (https://github.com/nvm-sh/nvm) or Homebrew (brew install node) instead.
+MSG
+  exit 1
+}
+
+# The node used by the service and by the commands below: bin/node after install, else the best found.
+node_bin() { if [ -x "$NODE_LINK" ]; then echo "$NODE_LINK"; else find_node; fi; }
+
+link_node() {
+  local n; n="$(find_node)"
+  ln -sfn "$n" "$NODE_LINK"
+  echo "bin/node -> $n ($("$NODE_LINK" --version))"
+}
+
+link_stable() {
+  ln -sfn "$ROOT" "$STABLE_LINK"
+  echo "$STABLE_LINK -> $ROOT"
+}
+
+render() {
+  # render <template> <out>
+  mkdir -p "$AGENTS" "$ROOT/logs"
+  sed -e "s|__ROOT__|$ROOT|g" -e "s|__LABEL__|$LABEL|g" -e "s|__HOME__|$HOME|g" -e "s|__PORT__|$PORT|g" -e "s|__TODONOW_HOME__|$TODONOW_HOME|g" "$1" > "$2"
+  plutil -lint "$2" >/dev/null
+}
+
+# The notification sender. `display notification` from osascript shows Script Editor's icon and
+# name; posting it from a tiny AppleScript applet (built here with the tools that ship with macOS,
+# nothing compiled) shows the TodoNow name and icon instead. Falls back to osascript when absent.
+NOTIFIER_APP="$ROOT/bin/TodoNow.app"
+build_notifier() {
+  local tmp; tmp="$(mktemp -d)"
+  cat > "$tmp/main.applescript" <<'EOS'
+-- The service passes the text through environment variables: applets launched from the
+-- command line do not receive arguments in their run handler on current macOS.
+set theTitle to system attribute "TODONOW_TITLE"
+set theMessage to system attribute "TODONOW_MESSAGE"
+set theSubtitle to system attribute "TODONOW_SUBTITLE"
+if theMessage is "" then return
+if theSubtitle is "" then
+  display notification theMessage with title theTitle
+else
+  display notification theMessage with title theTitle subtitle theSubtitle
+end if
+EOS
+  rm -rf "$NOTIFIER_APP"
+  osacompile -o "$NOTIFIER_APP" "$tmp/main.applescript" 2>/dev/null || { red "could not build the notification app (osacompile failed); notifications fall back to osascript"; rm -rf "$tmp"; return 0; }
+  local plist="$NOTIFIER_APP/Contents/Info.plist"
+  # The app icon comes from favicon.svg: rasterize with Quick Look, resize with sips, pack with iconutil.
+  if qlmanage -t -s 1024 -o "$tmp" "$ROOT/public/favicon.svg" >/dev/null 2>&1 && [ -f "$tmp/favicon.svg.png" ]; then
+    mkdir -p "$tmp/icon.iconset"
+    local s
+    for s in 16 32 128 256 512; do
+      sips -z "$s" "$s" "$tmp/favicon.svg.png" --out "$tmp/icon.iconset/icon_${s}x${s}.png" >/dev/null 2>&1
+      sips -z "$((s * 2))" "$((s * 2))" "$tmp/favicon.svg.png" --out "$tmp/icon.iconset/icon_${s}x${s}@2x.png" >/dev/null 2>&1
+    done
+    if iconutil -c icns "$tmp/icon.iconset" -o "$NOTIFIER_APP/Contents/Resources/applet.icns" 2>/dev/null; then
+      rm -f "$NOTIFIER_APP/Contents/Resources/Assets.car"
+      plutil -remove CFBundleIconName "$plist" >/dev/null 2>&1 || true
+    fi
+  fi
+  plutil -replace CFBundleIdentifier -string dev.todonow.notifier "$plist" >/dev/null
+  plutil -replace CFBundleName -string TodoNow "$plist" >/dev/null
+  plutil -replace CFBundleDisplayName -string TodoNow "$plist" >/dev/null
+  plutil -replace LSUIElement -bool true "$plist" >/dev/null
+  codesign --force --sign - "$NOTIFIER_APP" >/dev/null 2>&1 || true
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$NOTIFIER_APP" >/dev/null 2>&1 || true
+  rm -rf "$tmp"
+  echo "notification app -> $NOTIFIER_APP"
+}
+
+loaded() { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
+
+bootout_quiet() { if loaded "$1"; then launchctl bootout "$DOMAIN/$1" 2>/dev/null || true; sleep 0.5; fi; }
+
+do_install() {
+  link_node
+  link_stable
+  build_notifier
+  render "$ROOT/launchd/$LABEL.plist.tmpl" "$PLIST"
+  bootout_quiet "$LABEL"
+  launchctl bootstrap "$DOMAIN" "$PLIST"
+  launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
+  green "service installed and started (runs at every login)"
+  sleep 1
+  do_status
+}
+
+do_uninstall() {
+  bootout_quiet "$LABEL"
+  rm -f "$PLIST"
+  [ -L "$STABLE_LINK" ] && rm -f "$STABLE_LINK"
+  rm -rf "$NOTIFIER_APP"
+  green "uninstalled. Your todos and settings are untouched in $TODONOW_HOME/data"
+}
+
+do_start() {
+  [ -f "$PLIST" ] || { echo "not installed, run: todonow install"; exit 1; }
+  if loaded "$LABEL"; then launchctl kickstart "$DOMAIN/$LABEL"; else launchctl bootstrap "$DOMAIN" "$PLIST"; fi
+  sleep 1
+  do_status
+}
+
+do_stop() {
+  if loaded "$LABEL"; then launchctl bootout "$DOMAIN/$LABEL"; echo "stopped (stays down until login or todonow start)"; else echo "not running"; fi
+}
+
+do_restart() {
+  if ! loaded "$LABEL"; then do_start; return; fi
+  launchctl kickstart -k "$DOMAIN/$LABEL"
+  sleep 1
+  do_status
+}
+
+do_status() {
+  if loaded "$LABEL"; then
+    local info pid exitcode
+    info="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null || true)"
+    pid="$(echo "$info" | sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)"
+    exitcode="$(echo "$info" | sed -n 's/^[[:space:]]*last exit code = \(.*\)$/\1/p' | head -1)"
+    echo "service:  loaded, pid ${pid:-none}, last exit ${exitcode:-n/a}"
+  else
+    echo "service:  not loaded"
+  fi
+  echo "url:      $BASE"
+  if health="$(curl -fsS --max-time 2 "$BASE/api/health" 2>/dev/null)"; then
+    echo "health:   $health"
+    case "$health" in *'"restartNeeded":true'*) dim "code changed since start: run todonow restart";; esac
+  else
+    echo "health:   no response"
+  fi
+  echo "data:     $TODONOW_HOME/data"
+}
+
+do_logs() {
+  mkdir -p "$ROOT/logs"; touch "$ROOT/logs/out.log" "$ROOT/logs/err.log"
+  tail -n "${1:-40}" -f "$ROOT/logs/out.log" "$ROOT/logs/err.log"
+}
+
+do_doctor() {
+  echo "TodoNow doctor"
+  echo "-------------------"
+  local n; n="$(readlink "$NODE_LINK" 2>/dev/null || true)"
+  if [ -n "$n" ] && [ -x "$n" ]; then green "ok   node: $n ($("$n" --version))"; else red "FAIL node: bin/node missing, run todonow install"; fi
+  if [ -f "$PLIST" ]; then green "ok   agent plist: $PLIST"; else red "FAIL agent not installed, run todonow install"; fi
+  if loaded "$LABEL"; then green "ok   agent loaded"; else red "FAIL agent not loaded, run todonow start"; fi
+  if [ -L "$STABLE_LINK" ]; then green "ok   stable link: $STABLE_LINK -> $(readlink "$STABLE_LINK")"; else dim "     stable link ~/.todonow missing, run todonow install"; fi
+  if [ -x "$NOTIFIER_APP/Contents/MacOS/applet" ]; then green "ok   notification app: $NOTIFIER_APP"; else dim "     notification app missing (Script Editor icon is used), run todonow notifier"; fi
+  if [ -w "$TODONOW_HOME/data" ]; then green "ok   data folder writable: $TODONOW_HOME/data"; else red "FAIL data folder is not writable: $TODONOW_HOME/data"; fi
+  if ! curl -fsS --max-time 3 "$BASE/api/health" >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then red "FAIL port $PORT is used by another process: $(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | tail -1 | awk '{print $1, $2}')"; else red "FAIL service not responding on $BASE (see todonow logs)"; fi
+    return 1
+  fi
+  green "ok   service answers on $BASE"
+  curl -fsS --max-time 10 "$BASE/api/doctor" | "$(node_bin)" -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      const r=JSON.parse(s);
+      for (const c of r.checks) {
+        const tag = c.ok===true ? "\x1b[32mok  \x1b[0m" : c.ok===false ? "\x1b[31mFAIL\x1b[0m" : "\x1b[2minfo\x1b[0m";
+        console.log(`${tag} ${c.label}${c.detail ? ": " + c.detail : ""}`);
+        if (c.ok===false && c.fix) console.log(`     fix: ${c.fix}`);
+      }
+      if (r.restartNeeded) console.log("\x1b[33mnote\x1b[0m code changed since the service started: run todonow restart");
+    })'
+}
+
+do_update() {
+  if [ -d "$ROOT/.git" ]; then
+    (cd "$ROOT" && git pull --ff-only) || { red "git pull failed; resolve and re-run"; exit 1; }
+  else
+    red "This copy is not a Git checkout. Replace the code files by hand, keeping data/, then run: todonow restart"
+    exit 1
+  fi
+  link_node
+  do_restart
+}
+
+# ---- talking to the service ----
+
+# api <method> <path> [json body]: prints the response body, exits 1 with the error message on failure.
+api() {
+  local method="$1" path="$2" body="${3:-}" out code
+  if [ -n "$body" ]; then
+    out="$(curl -sS -w '\n%{http_code}' -X "$method" -H 'content-type: application/json' --data "$body" "$BASE$path" 2>&1)" || { red "TodoNow is not reachable at $BASE (run: todonow start)"; exit 1; }
+  else
+    out="$(curl -sS -w '\n%{http_code}' -X "$method" "$BASE$path" 2>&1)" || { red "TodoNow is not reachable at $BASE (run: todonow start)"; exit 1; }
+  fi
+  code="${out##*$'\n'}"
+  out="${out%$'\n'*}"
+  if [ "$code" -ge 400 ]; then red "$(printf '%s' "$out" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')"; exit 1; fi
+  printf '%s' "$out"
+}
+
+json_string() { "$(node_bin)" -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1"; }
+
+# print_todos: reads {todos:[...]} on stdin and prints one line per todo.
+print_todos() {
+  "$(node_bin)" -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      const r=JSON.parse(s);
+      if (!r.todos.length) { console.log("(nothing)"); return; }
+      for (const t of r.todos) {
+        const bits=[];
+        if (t.folder) bits.push(t.folder);
+        if (t.dueAt) bits.push((t.overdue ? "OVERDUE " : "due ") + new Date(t.dueAt).toLocaleString([], {dateStyle:"medium", timeStyle:"short"}));
+        else if (t.plannedDate) bits.push("plan " + t.plannedDate);
+        if (t.status !== "open") bits.push(t.status);
+        if (t.priority === "high") bits.push("high");
+        console.log(`[${t.id}] ${t.title}${bits.length ? "  (" + bits.join(", ") + ")" : ""}`);
+      }
+    })'
+}
+
+do_add() {
+  local title="${1:-}"; [ -n "$title" ] || { red 'usage: todonow add "Todo title" [folder]'; exit 1; }
+  local body; body="{\"title\":$(json_string "$title")"
+  [ -n "${2:-}" ] && body="$body,\"folder\":$(json_string "$2")"
+  body="$body}"
+  api POST /api/todos "$body" | "$(node_bin)" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const t=JSON.parse(s).todo;console.log(`added [${t.id}] ${t.title}${t.folder?"  ("+t.folder+")":""}`)})'
+}
+
+case "${1:-}" in
+  install) do_install ;;
+  uninstall) do_uninstall ;;
+  start) do_start ;;
+  stop) do_stop ;;
+  restart) do_restart ;;
+  status) do_status ;;
+  logs) do_logs "${2:-40}" ;;
+  doctor) do_doctor ;;
+  update) do_update ;;
+  open) open "$BASE/" ;;
+  run) TODONOW_HOME="$TODONOW_HOME" TODONOW_PORT="$PORT" exec "$(find_node)" "$ROOT/server.js" ;;
+  node) link_node ;;
+  notifier) build_notifier ;;
+  add) shift; do_add "$@" ;;
+  today) api GET "/api/todos?view=today" | print_todos ;;
+  now) api GET "/api/todos?view=now" | print_todos ;;
+  inbox) api GET "/api/todos?view=inbox" | print_todos ;;
+  search) shift; q="$*"; api GET "/api/todos?view=open&q=$("$(node_bin)" -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$q")" | print_todos ;;
+  done) [ -n "${2:-}" ] || { red "usage: todonow done ID"; exit 1; }; api POST "/api/todos/$2/complete" >/dev/null; green "completed $2" ;;
+  remind) api POST /api/reminders/run | "$(node_bin)" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s);console.log(r.delivered.length?r.delivered.map(d=>d.kind+": "+d.message).join("\n"):"nothing due right now")})' ;;
+  *)
+    cat <<USAGE
+usage: todonow <command>
+  install                 set up everything: node link, ~/.todonow link, login agent
+  uninstall               remove the agent and links; your data stays
+  start | stop | restart  control the service
+  status                  pid, health, data location
+  doctor                  check node, agent, port, data folder, notifications
+  update                  git pull (fast-forward) and restart
+  logs [n]                follow the service log
+  open                    open the web UI
+  run                     run the server in the foreground
+  node                    refresh bin/node after a node upgrade
+  notifier                rebuild the notification app (TodoNow name and icon on notifications)
+
+  add "title" [folder]    add a todo (to the Inbox, or into a folder)
+  today | now | inbox     list the todos in that view
+  search QUERY            search open todos (operators: in: tag: due: is: priority:)
+  done ID                 complete a todo
+  remind                  deliver any reminders that are due right now
+USAGE
+    ;;
+esac
