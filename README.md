@@ -34,16 +34,17 @@ uses a demo data set, not real todos.
   following. Tags remain optional cross-cutting labels.
 - **Dates that mean something.** A deadline (with a time) and a planned day are
   separate. Today shows what is due or planned today, anything overdue and
-  planned days that slipped; Upcoming shows later deadlines. Recurring todos
+  planned days that slipped; Upcoming shows later deadlines and planned days. Recurring todos
   file their next occurrence when you complete them.
 - **Now.** A short, deliberate queue for your current focus, with the estimated
   time added up.
 - **Defer.** One click (or `D`) moves a todo to tomorrow, next week or a day you
-  pick. It leaves Now and comes back in Today on that day; a deadline caps how
-  far it can go.
+  pick. It leaves Now, waits in Upcoming and comes back in Today on that day; a
+  deadline caps how far it can go, and a "deferred" badge keeps count.
 - **Archive a folder.** When a project is finished, archive its folder: it and
   its todos leave every view, count, picker and reminder without being deleted,
-  and wait under Done > Archived until you unarchive them.
+  and wait under Done > Archived, grouped by project with the archive date,
+  until you unarchive them.
 - **Reminders.** A daily macOS notification at a configurable time and a
   notification before each deadline (one hour by default, per-todo override,
   snooze, quiet hours). Notifications carry the TodoNow name and icon. The
@@ -81,9 +82,9 @@ nvm, Volta or Homebrew can skip this; the installer finds those too.
 
 ### Step 2: install TodoNow
 
-On the [GitHub page](https://github.com/gvensan/todonow) click the green
+On the [GitHub page](https://github.com/gvensan/go-todo) click the green
 **Code** button, then **Download ZIP**. Double-click the zip in Downloads to
-unpack it, drag the `todonow-master` folder into your home folder and rename it
+unpack it, drag the `go-todo-master` folder into your home folder and rename it
 `todonow`. Then, in Terminal (Cmd+Space, type `Terminal`, press Return):
 
 ```
@@ -98,7 +99,7 @@ your todos are stored in it.
 **Developers**:
 
 ```
-git clone git@github.com:gvensan/todonow.git ~/todonow
+git clone git@github.com:gvensan/go-todo.git ~/todonow
 cd ~/todonow && ./install.sh
 ```
 
@@ -158,9 +159,15 @@ onto another folder or onto the "Top level" zone that appears while dragging.
 **Archiving** is for finished projects. Open the folder and click **Archive**:
 the folder, its subfolders and their todos (open and completed) disappear from
 the tree, every view, the counts, the tag list, the folder pickers and the
-reminder schedule; anything in Now leaves it. Nothing is deleted. **Done >
-Archived** lists those todos and links to each archived folder, where
-**Unarchive** brings everything back. Archiving a todo on its own is not a
+reminder schedule; anything in Now leaves it, and the folder records
+`archivedAt`. Nothing is deleted. **Done > Archived** lists those todos grouped
+by project with the archive date, and links to each archived folder, where
+**Unarchive** brings everything back. Archived rows offer Edit, Move (to a live
+folder, which brings one todo back on its own) and Delete; Now and Defer are
+not offered because the views would ignore them. Unarchiving first shows how
+many open todos return and how many deadlines are already overdue; planned
+days that passed while the project was parked are cleared so only real
+deadlines land in Today. Archiving a todo on its own is not a
 thing: Someday, Completed and Trash already cover that.
 
 **Tags** are flat labels; a todo can have many. The sidebar shows them as
@@ -170,12 +177,30 @@ badges with a filter box.
 Upcoming before that, turns red when overdue, and triggers a notification.
 **Plan for** is the day you intend to work on it and puts the todo in Today on
 that day; a planned day that passes without being done stays in Today marked
-as slipped. **Repeat** (daily, weekdays, weekly, monthly) files the next
+as slipped.
+
+**Repeat** (daily, weekdays, weekly, monthly, yearly) files the next
 occurrence when you complete the todo, moving whichever of the two dates it
-has. **Defer** (on the row, in the bulk toolbar, `D`, or `bin/todonow defer`)
+has. A repeating todo needs one of them. The cadence is anchored: weekly keeps
+its weekday, monthly its day of month (Jan 31, Feb 28, Mar 31), yearly its
+date; deferring one occurrence does not move the anchor, editing the date by
+hand does. Occurrences missed while you were away are skipped, so the next one
+is always ahead of today. All occurrences share a series id; the drawer shows
+the next date and how many are done. **Skip** (on the row, in the drawer, or
+`bin/todonow skip`) moves an occurrence on without counting it as done, and
+reopening or undoing a completion takes back the copy it created.
+
+**Defer** (on the row, in the bulk toolbar, `D`, or `bin/todonow defer`)
 sets the planned day to tomorrow, next week or a date you pick, takes the todo
-out of Now, and turns a Someday item back into an open one; it refuses a day
-after the deadline. **Now** is the focus queue: the Now button on a row, the box in the
+out of Now, turns a Someday item back into an open one, and stamps
+`deferredAt` and `deferCount` so the row can show "deferred" (with the count
+when it is more than one). A day after the deadline is offered only as "moves
+deadline": the deadline moves to that day keeping its time, for this
+occurrence only, so an overdue todo can be rescheduled from the same menu. The
+todo waits in Upcoming and returns to Today on its day; Undo restores
+everything, dates included.
+
+**Now** is the focus queue: the Now button on a row, the box in the
 drawer or `nowOrder` in the API puts a todo there; completing it takes it out.
 
 ## Reminders
@@ -222,6 +247,7 @@ bin/todonow today | now | inbox
 bin/todonow search "in:People due:week"
 bin/todonow done <id>
 bin/todonow defer <id> [tomorrow|week|YYYY-MM-DD]
+bin/todonow skip <id>
 bin/todonow archive "Work/Project Alpha" | unarchive "Work/Project Alpha"
 bin/todonow remind                        deliver anything due right now
 ./uninstall.sh [--purge]                  remove the agent and links; --purge also deletes your data
@@ -260,11 +286,13 @@ the service reloads them.
 ```
 GET  /api/health  /api/meta  /api/doctor  /api/bookmarklet        GET /add (the bookmarklet popup)
 GET  /api/todos?view=&folder=&tag=&q=&limit=                     folder= includes subfolders; q takes the search operators
-POST /api/todos                { title, url, folder, dueAt, plannedDate, status, priority, tags, notes, estimateMinutes, recurrence, reminder, nowOrder }
-GET|PUT|DELETE /api/todos/:id  DELETE moves to the trash; DELETE ?permanent=1 removes from it
-POST /api/todos/:id/complete | reopen | restore | defer {until: tomorrow|week|YYYY-MM-DD} | snooze {minutes|until}
-POST /api/todos/bulk           { ids, op: trash|restore|purge|complete|reopen|move|now|unnow|defer, folder?, until? }
-GET|POST /api/folders {path}   POST /api/folders/rename {from, to}   POST /api/folders/delete {path}   POST /api/folders/archive {path, archived}
+POST /api/todos                { title, url, folder, dueAt, plannedDate, status, priority, tags, notes, estimateMinutes, recurrence (needs a date), reminder, nowOrder }
+GET|PUT|DELETE /api/todos/:id  GET adds series {id, done, total}; DELETE moves to the trash; DELETE ?permanent=1 removes from it
+POST /api/todos/:id/complete | reopen (takes back an untouched next occurrence) | restore | skip
+POST /api/todos/:id/defer      {until: tomorrow|week|YYYY-MM-DD, moveDeadline?}   400 with moveDeadline:true when the day is past the deadline
+POST /api/todos/:id/snooze     {minutes|until}
+POST /api/todos/bulk           { ids, op: trash|restore|purge|complete|reopen|move|now|unnow|defer|skip, folder?, until?, moveDeadline? }
+GET|POST /api/folders {path}   POST /api/folders/rename {from, to}   POST /api/folders/delete {path}   POST /api/folders/archive {path, archived} (replies with archivedAt, plansCleared, overdue)
 GET|PUT /api/settings          POST /api/reminders/test   POST /api/reminders/run
 GET  /api/export               POST /api/import {todos, folders}     POST /api/trash/empty
 POST /api/restart              exit non-zero so launchd relaunches the service (replies {relaunch:false} when run by hand)

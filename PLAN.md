@@ -35,17 +35,22 @@ optional cross-cutting labels.
 
 ## Delivered
 
-- Todo CRUD, complete/reopen, soft-delete/restore, permanent delete, recurring
-  copies (deadline or planned day, snooze and Now slot not inherited).
+- Todo CRUD, complete/reopen, soft-delete/restore, permanent delete.
+- Repeat daily to yearly with a series id and an anchor (weekday, day of
+  month, date); missed occurrences skipped; next-occurrence preview; Skip;
+  reopen and undo take back the spawned copy; a repeating todo needs a date.
 - Nested folders: create, rename/move (ancestors kept), delete (todos move to
   the parent), tree with expand/collapse and filter, drag and drop for todos
   and folders, folder picker in the drawer.
 - Views: All, Inbox, Today, Now, Upcoming, Waiting, Someday, Unfiled,
   Completed, Trash, plus folder and tag views. List or grid.
 - Defer on rows, in bulk, by keyboard and CLI: moves the planned day, leaves
-  Now, respects the deadline.
-- Folder archiving: a finished project leaves every view, count, picker and
-  reminder; Done > Archived lists it; unarchive restores it. No per-todo
+  Now, stamps deferredAt and deferCount; past the deadline it is offered as
+  "moves deadline" (explicit flag, this occurrence only); Upcoming lists
+  planned days as well as deadlines.
+- Folder archiving with archivedAt: a finished project leaves every view,
+  count, picker and reminder; Done > Archived lists it grouped by project;
+  unarchive restores it and clears planned days that passed meanwhile. No per-todo
   archive (Someday, Completed and Trash cover that).
 - Bulk select (hover checkbox, Shift+click, X, ⌘A) with complete, defer, move,
   Now, delete, restore, purge, and Undo.

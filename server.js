@@ -36,7 +36,7 @@ function log(...args) {
 
 const PRIORITIES = ['none', 'low', 'medium', 'high'];
 const STATUSES = ['open', 'waiting', 'someday'];
-const RECURRENCES = ['daily', 'weekdays', 'weekly', 'monthly'];
+const RECURRENCES = ['daily', 'weekdays', 'weekly', 'monthly', 'yearly'];
 const THEMES = ['system', 'light', 'dark'];
 const ID_RE = /^[a-z0-9]{4,16}$/;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -131,6 +131,7 @@ function setFolder(value) {
 // Applies the editable fields from `body` onto `todo`. Fields that are absent are left alone,
 // so the same function serves POST (with a fresh record) and PUT (with the stored one).
 function applyFields(todo, body) {
+  const before = { dueAt: todo.dueAt, plannedDate: todo.plannedDate, recurrence: todo.recurrence };
   if ('title' in body) {
     const title = cleanText(body.title, 500);
     if (!title) throw new HttpError(400, 'a todo title is required');
@@ -149,14 +150,83 @@ function applyFields(todo, body) {
   if ('waitingFor' in body) todo.waitingFor = cleanText(body.waitingFor, 200) || null;
   if ('reminder' in body) todo.reminder = normalizeReminder(body.reminder);
   if ('recurrence' in body) todo.recurrence = cleanEnum(body.recurrence, RECURRENCES, 'recurrence', null);
+  if ('deferCount' in body) todo.deferCount = cleanInt(body.deferCount, 'deferCount', 0, 100000, 0) || 0;
+  if ('deferredAt' in body) todo.deferredAt = cleanDate(body.deferredAt, 'deferredAt');
+  if ('skipCount' in body) todo.skipCount = cleanInt(body.skipCount, 'skipCount', 0, 100000, 0) || 0;
+  if ('repeatAnchor' in body) todo.repeatAnchor = cleanAnchor(body.repeatAnchor);
+  if (todo.recurrence) {
+    if (!todo.dueAt && !todo.plannedDate) throw new HttpError(400, 'a repeating todo needs a deadline or a planned day');
+    if (!todo.seriesId) todo.seriesId = store.newId();
+    // An edited date or cadence is a deliberate re-anchoring; Defer moves one occurrence and leaves the anchor.
+    const changed = before.dueAt !== todo.dueAt || before.plannedDate !== todo.plannedDate || before.recurrence !== todo.recurrence;
+    if ((changed || todo.repeatAnchor == null) && !('repeatAnchor' in body)) todo.repeatAnchor = anchorFor(todo.recurrence, scheduleDate(todo));
+  } else {
+    todo.repeatAnchor = null;
+  }
   return todo;
+}
+
+function cleanAnchor(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'string' && /^\d{2}-\d{2}$/.test(value)) return value;
+  const n = Number(value);
+  if (Number.isInteger(n) && n >= 0 && n <= 31) return n;
+  throw new HttpError(400, 'repeatAnchor must be a weekday (0-6), a day of month (1-31) or MM-DD');
+}
+
+// ---- recurrence: series, anchors and the next occurrence ----
+
+// The date a todo is scheduled on: its deadline, else noon of its planned day.
+function scheduleDate(todo) {
+  return todo.dueAt ? new Date(todo.dueAt) : new Date(todo.plannedDate + 'T12:00:00');
+}
+
+// What the cadence is pinned to: the weekday for weekly, the day of month for monthly, month and
+// day for yearly. Daily and weekdays need no anchor.
+function anchorFor(recurrence, date) {
+  if (recurrence === 'weekly') return date.getDay();
+  if (recurrence === 'monthly') return date.getDate();
+  if (recurrence === 'yearly') return String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
+  return null;
+}
+
+const daysIn = (d) => new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+
+// One step of the cadence from `date`, honouring the anchor so a deferred or clamped occurrence
+// snaps back (Jan 31 -> Feb 28 -> Mar 31; a weekly Monday deferred to Wednesday -> next Monday).
+function stepOccurrence(date, recurrence, anchor) {
+  const d = new Date(date.getTime());
+  if (recurrence === 'daily') d.setDate(d.getDate() + 1);
+  else if (recurrence === 'weekdays') { do { d.setDate(d.getDate() + 1); } while (d.getDay() === 0 || d.getDay() === 6); }
+  else if (recurrence === 'weekly') { const target = Number.isInteger(anchor) ? anchor : d.getDay(); do { d.setDate(d.getDate() + 1); } while (d.getDay() !== target); }
+  else if (recurrence === 'monthly') { const day = Number.isInteger(anchor) && anchor >= 1 ? anchor : d.getDate(); d.setDate(1); d.setMonth(d.getMonth() + 1); d.setDate(Math.min(day, daysIn(d))); }
+  else if (recurrence === 'yearly') {
+    const [mm, dd] = typeof anchor === 'string' ? anchor.split('-').map(Number) : [d.getMonth() + 1, d.getDate()];
+    d.setDate(1); d.setFullYear(d.getFullYear() + 1); d.setMonth(mm - 1); d.setDate(Math.min(dd, daysIn(d)));
+  } else return null;
+  return d;
+}
+
+// The next occurrence after the current one, skipping any that were missed: for a deadline, past
+// times; for a planned day, past days (today still counts). Returns { dueAt, plannedDate }.
+function nextOccurrence(todo, now = new Date()) {
+  if (!todo.recurrence || (!todo.dueAt && !todo.plannedDate)) return null;
+  const today = localDay(now);
+  let next = stepOccurrence(scheduleDate(todo), todo.recurrence, todo.repeatAnchor);
+  for (let guard = 0; next && guard < 5000; guard += 1) {
+    const missed = todo.dueAt ? next.getTime() <= now.getTime() : localDay(next) < today;
+    if (!missed) break;
+    next = stepOccurrence(next, todo.recurrence, todo.repeatAnchor);
+  }
+  if (!next) return null;
+  return todo.dueAt ? { dueAt: next.toISOString(), plannedDate: null } : { dueAt: null, plannedDate: localDay(next) };
 }
 
 function blankTodo(id, now) {
   return {
     id, title: '', notes: '', url: null, folder: null, tags: [], priority: 'none', status: 'open',
     dueAt: null, plannedDate: null, nowOrder: null, estimateMinutes: null, waitingFor: null,
-    reminder: null, recurrence: null, createdAt: now, updatedAt: now, completedAt: null, deletedAt: null,
+    reminder: null, recurrence: null, repeatAnchor: null, seriesId: null, prevId: null, nextId: null, skipCount: 0, deferCount: 0, deferredAt: null, createdAt: now, updatedAt: now, completedAt: null, deletedAt: null,
   };
 }
 
@@ -192,33 +262,9 @@ function completeTodo(todo, now = new Date()) {
   return todo;
 }
 
-function advance(date, recurrence) {
-  const next = new Date(date.getTime());
-  if (recurrence === 'daily') next.setDate(next.getDate() + 1);
-  else if (recurrence === 'weekdays') { do { next.setDate(next.getDate() + 1); } while (next.getDay() === 0 || next.getDay() === 6); }
-  else if (recurrence === 'weekly') next.setDate(next.getDate() + 7);
-  else if (recurrence === 'monthly') {
-    const day = next.getDate();
-    next.setDate(1);
-    next.setMonth(next.getMonth() + 1);
-    const last = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
-    next.setDate(Math.min(day, last));
-  } else return null;
-  return next;
-}
-
 function createRecurringCopy(todo, now) {
-  let dueAt = null;
-  let plannedDate = null;
-  if (todo.dueAt) {
-    const next = advance(new Date(todo.dueAt), todo.recurrence);
-    if (!next) return null;
-    dueAt = next.toISOString();
-  } else if (todo.plannedDate) {
-    const next = advance(new Date(todo.plannedDate + 'T12:00:00'), todo.recurrence);
-    if (!next) return null;
-    plannedDate = localDay(next);
-  } else return null;
+  const next = nextOccurrence(todo, now);
+  if (!next) return null;
   const reminder = todo.reminder ? { ...todo.reminder } : null;
   if (reminder) delete reminder.snoozedUntil;
   const stamp = now.toISOString();
@@ -226,11 +272,46 @@ function createRecurringCopy(todo, now) {
     ...blankTodo(store.newId(), stamp),
     title: todo.title, notes: todo.notes, url: todo.url || null, folder: todo.folder, tags: (todo.tags || []).slice(),
     priority: todo.priority, status: todo.status === 'someday' ? 'open' : todo.status, waitingFor: todo.waitingFor,
-    estimateMinutes: todo.estimateMinutes, recurrence: todo.recurrence, reminder: reminder && Object.keys(reminder).length ? reminder : null,
-    dueAt, plannedDate,
+    estimateMinutes: todo.estimateMinutes, recurrence: todo.recurrence, repeatAnchor: todo.repeatAnchor, seriesId: todo.seriesId || todo.id,
+    reminder: reminder && Object.keys(reminder).length ? reminder : null,
+    dueAt: next.dueAt, plannedDate: next.plannedDate, prevId: todo.id,
   };
+  if (!todo.seriesId) todo.seriesId = copy.seriesId;
+  todo.nextId = copy.id;
   store.todos.push(copy);
   return copy;
+}
+
+// Reopening a completed repeating todo takes back the occurrence it spawned, as long as that
+// copy is untouched, so the series does not fork. Returns true when a copy was removed.
+function reopenTodo(todo, now = new Date()) {
+  todo.completedAt = null;
+  let removed = false;
+  if (todo.nextId) {
+    const next = store.findTodo(todo.nextId);
+    if (next && !next.completedAt && !next.deletedAt && next.updatedAt === next.createdAt) {
+      store.data.todos = store.todos.filter((t) => t.id !== next.id);
+      removed = true;
+    }
+    todo.nextId = null;
+  }
+  todo.updatedAt = now.toISOString();
+  return removed;
+}
+
+// Skip moves this occurrence forward to the next one without counting it as done.
+function skipTodo(todo, now = new Date()) {
+  if (!todo.recurrence) throw new HttpError(409, 'only repeating todos can be skipped');
+  if (todo.completedAt || todo.deletedAt) throw new HttpError(409, 'only open todos can be skipped');
+  const next = nextOccurrence(todo, now);
+  if (!next) throw new HttpError(409, 'this todo has no date to move forward');
+  todo.dueAt = next.dueAt;
+  if (!todo.dueAt) todo.plannedDate = next.plannedDate;
+  todo.nowOrder = null;
+  if (todo.reminder && todo.reminder.snoozedUntil) delete todo.reminder.snoozedUntil;
+  todo.skipCount = (todo.skipCount || 0) + 1;
+  todo.updatedAt = now.toISOString();
+  return todo;
 }
 
 function trashTodo(todo, now = new Date().toISOString()) {
@@ -242,7 +323,15 @@ function trashTodo(todo, now = new Date().toISOString()) {
 }
 
 function decorate(todo, now = new Date()) {
-  return { ...todo, overdue: isOverdue(todo, now) };
+  const out = { ...todo, overdue: isOverdue(todo, now), archived: store.isArchived(todo) };
+  if (todo.recurrence && !todo.completedAt && !todo.deletedAt) { const next = nextOccurrence(todo, now); out.next = next ? (next.dueAt || next.plannedDate) : null; }
+  return out;
+}
+
+function seriesInfo(todo) {
+  if (!todo.seriesId) return null;
+  const members = store.todos.filter((t) => t.seriesId === todo.seriesId && !t.deletedAt);
+  return { id: todo.seriesId, done: members.filter((t) => t.completedAt).length, total: members.length };
 }
 
 const VIEWS = ['all', 'open', 'inbox', 'today', 'now', 'upcoming', 'waiting', 'someday', 'unfiled', 'completed', 'archived', 'trash'];
@@ -260,7 +349,8 @@ function inView(todo, view, today, now, includeArchived = false) {
     // Due or planned today, anything overdue, and planned days that slipped past without being done.
     case 'today': return open && todo.status !== 'someday' && ((todo.plannedDate && todo.plannedDate <= today) || (todo.dueAt && localDay(new Date(todo.dueAt)) === today) || isOverdue(todo, now));
     case 'now': return open && Number.isFinite(todo.nowOrder);
-    case 'upcoming': return open && Boolean(todo.dueAt) && localDay(new Date(todo.dueAt)) > today;
+    // Later deadlines and later planned days: where a deferred todo waits until its day.
+    case 'upcoming': return open && todo.status !== 'someday' && ((Boolean(todo.dueAt) && localDay(new Date(todo.dueAt)) > today) || (Boolean(todo.plannedDate) && todo.plannedDate > today));
     case 'waiting': return open && todo.status === 'waiting';
     case 'someday': return open && todo.status === 'someday';
     case 'unfiled': return open && !todo.folder;
@@ -275,6 +365,11 @@ function compareTodos(view) {
     if (view === 'now') return (a.nowOrder || 0) - (b.nowOrder || 0);
     if (view === 'completed') return Date.parse(b.completedAt || 0) - Date.parse(a.completedAt || 0);
     if (view === 'trash') return Date.parse(b.deletedAt || 0) - Date.parse(a.deletedAt || 0);
+    if (view === 'archived') {
+      const fa = (a.folder || '').toLowerCase(), fb = (b.folder || '').toLowerCase();
+      if (fa !== fb) return fa < fb ? -1 : 1;
+      if (Boolean(a.completedAt) !== Boolean(b.completedAt)) return a.completedAt ? 1 : -1;
+    }
     const ao = isOverdue(a), bo = isOverdue(b);
     if (ao !== bo) return ao ? -1 : 1;
     const ad = a.dueAt ? Date.parse(a.dueAt) : a.plannedDate ? Date.parse(a.plannedDate + 'T23:59:59') : Infinity;
@@ -324,20 +419,29 @@ function folderTree() {
     const archived = store.isArchived(f.path);
     if (!archived) return { ...f, archived: false };
     const rec = store.findFolder(f.path);
-    return { ...f, archived: true, archivedHere: Boolean(rec && rec.archived), count: archivedLive.filter((t) => t.folder && t.folder.toLowerCase() === f.path.toLowerCase()).length, total: archivedLive.filter((t) => folders.isWithin(t.folder, f.path)).length };
+    return { ...f, archived: true, archivedHere: Boolean(rec && rec.archived), archivedAt: rec && rec.archived ? rec.archivedAt || null : null, count: archivedLive.filter((t) => t.folder && t.folder.toLowerCase() === f.path.toLowerCase()).length, total: archivedLive.filter((t) => folders.isWithin(t.folder, f.path)).length };
   });
 }
 
 // Defer: move the planned day forward. `until` is tomorrow, week, or YYYY-MM-DD. A deferred todo
 // leaves Now, and a Someday item becomes open again since a date is a commitment.
-function deferTodo(todo, until, now = new Date()) {
+function deferTodo(todo, until, now = new Date(), moveDeadline = false) {
   if (todo.completedAt || todo.deletedAt) throw new HttpError(409, 'only open todos can be deferred');
   const day = deferDay(until, now);
-  if (todo.dueAt && localDay(new Date(todo.dueAt)) < day) throw new HttpError(400, `that is after the deadline (${localDay(new Date(todo.dueAt))})`);
+  if (todo.dueAt && localDay(new Date(todo.dueAt)) < day) {
+    if (!moveDeadline) throw new HttpError(400, `that is after the deadline (${localDay(new Date(todo.dueAt))})`, { deadline: localDay(new Date(todo.dueAt)), moveDeadline: true });
+    // Same time of day on the new date. This occurrence only: the repeat anchor is untouched.
+    const d = new Date(todo.dueAt);
+    const [y, m, dd] = day.split('-').map(Number);
+    d.setFullYear(y, m - 1, dd);
+    todo.dueAt = d.toISOString();
+  }
   todo.plannedDate = day;
   todo.nowOrder = null;
   if (todo.status === 'someday') todo.status = 'open';
-  todo.updatedAt = now.toISOString();
+  todo.deferCount = (todo.deferCount || 0) + 1;
+  todo.deferredAt = now.toISOString();
+  todo.updatedAt = todo.deferredAt;
   return todo;
 }
 
@@ -417,6 +521,20 @@ async function doctor() {
   return { ok: checks.every((c) => c.ok !== false), checks, version: VERSION, port: PORT, home: HOME_DIR, restartNeeded: codeChangedSinceStart() };
 }
 
+// Records written before series ids and repeat anchors existed get them on start-up, so an
+// old weekly todo keeps its weekday from here on. Runs again after a reload from disk.
+function migrateTodos() {
+  let changed = 0;
+  for (const todo of store.todos) {
+    if (!todo.recurrence || (!todo.dueAt && !todo.plannedDate)) continue;
+    if (!todo.seriesId) { todo.seriesId = store.newId(); changed += 1; }
+    if (todo.repeatAnchor == null) { const anchor = anchorFor(todo.recurrence, scheduleDate(todo)); if (anchor != null) { todo.repeatAnchor = anchor; changed += 1; } }
+  }
+  if (changed) { store.save('todos'); log(`[migrate] added series ids and repeat anchors to ${changed} field${changed === 1 ? '' : 's'}`); }
+}
+migrateTodos();
+store.on('reloaded', (name) => { if (name === 'todos') migrateTodos(); });
+
 // ---------------------------------------------------------------------------
 // Import: every record is rebuilt through the same validation as the API. Ids are kept when
 // they look like ours and are free; timestamps are kept when they parse.
@@ -473,7 +591,7 @@ async function route(req, res, url) {
   if (p === '/api/todos/bulk' && method === 'POST') {
     const body = await readJson(req);
     const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
-    const op = cleanEnum(body.op, ['trash', 'restore', 'purge', 'complete', 'reopen', 'move', 'now', 'unnow', 'defer'], 'op');
+    const op = cleanEnum(body.op, ['trash', 'restore', 'purge', 'complete', 'reopen', 'move', 'now', 'unnow', 'defer', 'skip'], 'op');
     if (!ids.length) throw new HttpError(400, 'ids are required');
     const folder = op === 'move' ? setFolder(body.folder) : null;
     const now = new Date();
@@ -489,11 +607,12 @@ async function route(req, res, url) {
       if (op === 'trash') { if (todo.deletedAt) { skipped.push({ id, reason: 'already in the trash' }); continue; } trashTodo(todo, stamp); }
       else if (op === 'restore') { if (!todo.deletedAt) { skipped.push({ id, reason: 'not in the trash' }); continue; } todo.deletedAt = null; todo.updatedAt = stamp; }
       else if (op === 'complete') { if (todo.completedAt || todo.deletedAt) { skipped.push({ id, reason: todo.deletedAt ? 'in the trash' : 'already completed' }); continue; } completeTodo(todo, now); }
-      else if (op === 'reopen') { if (!todo.completedAt) { skipped.push({ id, reason: 'not completed' }); continue; } todo.completedAt = null; todo.updatedAt = stamp; }
+      else if (op === 'reopen') { if (!todo.completedAt) { skipped.push({ id, reason: 'not completed' }); continue; } reopenTodo(todo, now); }
       else if (op === 'move') { if (todo.deletedAt) { skipped.push({ id, reason: 'in the trash' }); continue; } todo.folder = folder; todo.updatedAt = stamp; }
       else if (op === 'now') { if (todo.completedAt || todo.deletedAt) { skipped.push({ id, reason: 'not open' }); continue; } if (!Number.isFinite(todo.nowOrder)) todo.nowOrder = Date.now() + changed; todo.updatedAt = stamp; }
       else if (op === 'unnow') { todo.nowOrder = null; todo.updatedAt = stamp; }
-      else if (op === 'defer') { try { deferTodo(todo, until, now); } catch (err) { skipped.push({ id, reason: err.message }); continue; } }
+      else if (op === 'defer') { try { deferTodo(todo, until, now, Boolean(body.moveDeadline)); } catch (err) { skipped.push({ id, reason: err.message }); continue; } }
+      else if (op === 'skip') { try { skipTodo(todo, now); } catch (err) { skipped.push({ id, reason: err.message }); continue; } }
       changed += 1;
     }
     if (op === 'purge' && keep.size) store.data.todos = store.todos.filter((todo) => !keep.has(todo.id));
@@ -503,7 +622,7 @@ async function route(req, res, url) {
   if (seg[0] === 'api' && seg[1] === 'todos' && seg.length >= 3) {
     const todo = requireTodo(seg[2]);
     const action = seg[3] || '';
-    if (seg.length === 3 && method === 'GET') return sendJson(res, 200, { todo: decorate(todo) });
+    if (seg.length === 3 && method === 'GET') return sendJson(res, 200, { todo: decorate(todo), series: seriesInfo(todo) });
     if (seg.length === 3 && method === 'PUT') return sendJson(res, 200, { todo: decorate(updateTodo(todo, await readJson(req))) });
     if (seg.length === 3 && method === 'DELETE') {
       if (param(url, 'permanent') === '1') {
@@ -518,11 +637,12 @@ async function route(req, res, url) {
     }
     if (method === 'POST' && seg.length === 4) {
       if (action === 'complete') { completeTodo(todo); store.save('todos'); return sendJson(res, 200, { todo: decorate(todo) }); }
-      if (action === 'reopen') { todo.completedAt = null; todo.updatedAt = new Date().toISOString(); store.save('todos'); return sendJson(res, 200, { todo: decorate(todo) }); }
+      if (action === 'reopen') { const removedNext = reopenTodo(todo); store.save('todos'); return sendJson(res, 200, { todo: decorate(todo), removedNext }); }
+      if (action === 'skip') { skipTodo(todo); store.save('todos'); return sendJson(res, 200, { todo: decorate(todo) }); }
       if (action === 'restore') { todo.deletedAt = null; todo.updatedAt = new Date().toISOString(); store.save('todos'); return sendJson(res, 200, { todo: decorate(todo) }); }
       if (action === 'defer') {
         const body = await readJson(req);
-        deferTodo(todo, body.until);
+        deferTodo(todo, body.until, new Date(), Boolean(body.moveDeadline));
         store.save('todos');
         return sendJson(res, 200, { todo: decorate(todo) });
       }
@@ -574,14 +694,31 @@ async function route(req, res, url) {
     if (!target || !store.findFolder(target)) throw new HttpError(404, 'no such folder');
     const rec = store.findFolder(target);
     const archived = body.archived == null ? !rec.archived : Boolean(body.archived);
-    if (archived) rec.archived = true; else delete rec.archived;
-    let cleared = 0;
-    if (archived) for (const todo of store.todos) if (Number.isFinite(todo.nowOrder) && folders.isWithin(todo.folder, target)) { todo.nowOrder = null; todo.updatedAt = new Date().toISOString(); cleared += 1; }
+    const now = new Date();
+    const stamp = now.toISOString();
+    const today = localDay(now);
+    let touched = 0, plansCleared = 0, overdue = 0;
+    if (archived) {
+      rec.archived = true;
+      rec.archivedAt = stamp;
+      // A parked project has no claim on the focus queue.
+      for (const todo of store.todos) if (Number.isFinite(todo.nowOrder) && folders.isWithin(todo.folder, target)) { todo.nowOrder = null; todo.updatedAt = stamp; touched += 1; }
+    } else {
+      delete rec.archived;
+      delete rec.archivedAt;
+      // Coming back: a planned day that passed while the project was parked is stale and is
+      // dropped, so Today is not flooded with old plans. Real deadlines stay and are reported.
+      for (const todo of store.todos) {
+        if (todo.completedAt || todo.deletedAt || !folders.isWithin(todo.folder, target)) continue;
+        if (todo.plannedDate && todo.plannedDate < today) { todo.plannedDate = null; todo.updatedAt = stamp; plansCleared += 1; touched += 1; }
+        if (isOverdue(todo, now)) overdue += 1;
+      }
+    }
     store.save('folders');
-    if (cleared) store.save('todos');
+    if (touched) store.save('todos');
     // Still inside an archived parent after unarchiving? Say so, the caller may want to unarchive that instead.
     const parentArchived = !archived && store.isArchived(target);
-    return sendJson(res, 200, { ok: true, path: rec.path, archived, effective: store.isArchived(target), parentArchived, todos: store.live.filter((t) => folders.isWithin(t.folder, target)).length });
+    return sendJson(res, 200, { ok: true, path: rec.path, archived, archivedAt: rec.archivedAt || null, effective: store.isArchived(target), parentArchived, todos: store.live.filter((t) => folders.isWithin(t.folder, target)).length, plansCleared, overdue });
   }
   if (p === '/api/folders/delete' && method === 'POST') {
     const body = await readJson(req);
@@ -670,7 +807,7 @@ async function route(req, res, url) {
       for (const rec of body.folders) {
         const wanted = folders.normalizeFolder(rec && rec.path);
         if (wanted && !store.findFolder(wanted)) { store.ensureFolder(wanted); foldersAdded += 1; }
-        if (wanted && rec.archived) { const kept = store.findFolder(wanted); if (kept) kept.archived = true; }
+        if (wanted && rec.archived) { const kept = store.findFolder(wanted); if (kept) { kept.archived = true; kept.archivedAt = (() => { try { return cleanDate(rec.archivedAt, 'archivedAt'); } catch { return null; } })() || kept.archivedAt || new Date().toISOString(); } }
       }
     }
     if (added.length) store.save('todos');
@@ -777,4 +914,4 @@ server.listen(PORT, HOST, () => {
   trashTimer.unref();
 });
 
-module.exports = { server, store, scheduler, createTodo, updateTodo, completeTodo, deferTodo, deferDay, advance, listTodos, counts };
+module.exports = { server, store, scheduler, createTodo, updateTodo, completeTodo, reopenTodo, skipTodo, deferTodo, deferDay, nextOccurrence, stepOccurrence, anchorFor, listTodos, counts };

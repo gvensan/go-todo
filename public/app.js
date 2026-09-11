@@ -118,6 +118,9 @@
   }
   function timeLabel(iso) { return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(iso)); }
   function dueLabel(todo) { return todo.dueAt ? dayLabel(dayKey(new Date(todo.dueAt))) + ', ' + timeLabel(todo.dueAt) : ''; }
+  // "Mon 22 Sep, 9:00 AM" for a deadline series, "Mon 22 Sep" for a planned one.
+  function nextLabel(t) { return t.next && t.next.length > 10 ? dayLabel(dayKey(new Date(t.next))) + ', ' + timeLabel(t.next) : dayLabel(t.next); }
+
   function dueClass(todo) {
     if (!todo.dueAt) return '';
     if (todo.overdue) return 'overdue';
@@ -209,7 +212,7 @@
     priority: 'High priority shows a red dot and sorts first among todos with the same date.',
     estimate: 'Rough duration, shown with the todo. Handy when pulling work into Now.',
     now: 'A short, deliberate queue for your current focus. The Now view lists these in the order you added them.',
-    repeat: 'When you complete this todo, the next occurrence is created with its deadline or planned day moved forward.',
+    repeat: 'Completing this todo files the next occurrence. Weekly keeps the weekday, monthly the day of month, yearly the date; missed occurrences are skipped so the next one is ahead of today. Skip moves this occurrence on without counting it done. Needs a deadline or a planned day.',
     reminder: 'When the deadline notification fires. Default follows Settings. Off silences this todo only.',
     tags: 'Optional cross-cutting labels for filtering (click a tag in the sidebar) and search (tag:name). Type a tag and press Enter or comma.',
     notes: 'Anything useful: context, links, next steps. Searched too.',
@@ -563,11 +566,11 @@
     html += '<span>' + plural(state.total, 'todo') + (state.q ? ' match' : '') + '</span>';
     if (r.view === 'today' && !r.folder && !r.tag) html += '<span class="small muted">' + esc(new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date())) + '</span>';
     const folderNode = r.folder && state.meta ? state.meta.folders.find((f) => f.path.toLowerCase() === r.folder.toLowerCase()) : null;
-    if (folderNode && folderNode.archived) html += '<span class="badge" title="' + (folderNode.archivedHere ? 'This folder is archived' : 'A parent folder is archived') + '">archived</span>';
-    if (r.folder) html += '<button class="btn sm ghost" id="subFolder" title="Create a folder inside this one">Subfolder</button><button class="btn sm ghost" id="renameFolder" title="Rename or move this folder">Rename</button>' + (folderNode && !folderNode.archived ? '<button class="btn sm ghost" id="archiveFolder" title="Finished with this project? Hide the folder and its todos from every view, count and reminder; nothing is deleted">Archive</button>' : folderNode && folderNode.archivedHere ? '<button class="btn sm ghost" id="archiveFolder" title="Bring this folder and its todos back">Unarchive</button>' : '') + '<button class="btn sm ghost danger" id="deleteFolder" title="Delete this folder and its subfolders; todos move to the parent">Delete folder</button>';
+    if (folderNode && folderNode.archived) html += '<span class="badge" title="' + (folderNode.archivedHere ? 'This folder is archived' : 'A parent folder is archived') + '">archived' + (folderNode.archivedAt ? ' ' + esc(rel(folderNode.archivedAt)) : '') + '</span>';
+    if (r.folder) html += (folderNode && folderNode.archived ? '' : '<button class="btn sm ghost" id="subFolder" title="Create a folder inside this one">Subfolder</button>') + '<button class="btn sm ghost" id="renameFolder" title="Rename or move this folder">Rename</button>' + (folderNode && !folderNode.archived ? '<button class="btn sm ghost" id="archiveFolder" title="Finished with this project? Hide the folder and its todos from every view, count and reminder; nothing is deleted">Archive</button>' : folderNode && folderNode.archivedHere ? '<button class="btn sm ghost" id="archiveFolder" title="Bring this folder and its todos back">Unarchive</button>' : '') + '<button class="btn sm ghost danger" id="deleteFolder" title="Delete this folder and its subfolders; todos move to the parent">Delete folder</button>';
     if (r.view === 'archived' && !r.folder) {
       const roots = (state.meta ? state.meta.folders : []).filter((f) => f.archivedHere);
-      html += roots.length ? '<span class="small muted">Folders:</span>' + roots.map((f) => '<a class="tag-badge" href="' + folderHash(f.path) + '" title="' + esc(f.path) + '">' + FOLDER_ICO + ' ' + esc(f.path) + '<span class="n">' + f.total + '</span></a>').join('') : '<span class="small muted">Archive a folder from its toolbar when a project is finished.</span>';
+      html += roots.length ? '<span class="small muted">Projects:</span>' + roots.map((f) => '<a class="tag-badge" href="' + folderHash(f.path) + '" title="' + esc(f.path) + (f.archivedAt ? ', archived ' + rel(f.archivedAt) : '') + '">' + FOLDER_ICO + ' ' + esc(f.path) + '<span class="n">' + f.total + '</span></a>').join('') : '<span class="small muted">Archive a folder from its toolbar when a project is finished.</span>';
     }
     if (r.view === 'trash') {
       const days = state.meta ? state.meta.settings.trashDays || 30 : 30;
@@ -602,12 +605,20 @@
     const node = state.meta && state.meta.folders.find((f) => f.path.toLowerCase() === path.toLowerCase());
     const n = node ? node.total : 0;
     if (archived) {
-      const ok = await dialog({ input: false, ok: 'Archive', title: 'Archive ' + path + '?', message: 'The folder, its subfolders and ' + plural(n, 'todo') + ' leave every view, count, picker and reminder. Nothing is deleted: find them under <b>Done &gt; Archived</b> and unarchive any time.' });
+      const ok = await dialog({ input: false, ok: 'Archive', title: 'Archive ' + path + '?', message: 'The folder, its subfolders and ' + plural(n, 'todo') + ' leave every view, count, picker and reminder, and anything in Now leaves it. Nothing is deleted: find them under <b>Done &gt; Archived</b> and unarchive any time.' });
+      if (!ok) return;
+    } else {
+      let open = [];
+      try { open = (await api('GET', '/api/todos?view=open&folder=' + encodeURIComponent(path))).todos; } catch { /* fall through with no preview */ }
+      const today = dayKey();
+      const overdue = open.filter((t) => t.overdue).length;
+      const stale = open.filter((t) => t.plannedDate && t.plannedDate < today).length;
+      const ok = await dialog({ input: false, ok: 'Unarchive', title: 'Unarchive ' + path + '?', message: plural(open.length, 'open todo') + ' come' + (open.length === 1 ? 's' : '') + ' back into the views and counts.' + (overdue ? ' <b>' + plural(overdue, 'deadline') + ' ' + (overdue === 1 ? 'is' : 'are') + ' already overdue</b> and will show in Today.' : '') + (stale ? ' ' + plural(stale, 'planned day') + ' that passed meanwhile ' + (stale === 1 ? 'is' : 'are') + ' cleared, so only real deadlines return to Today.' : '') });
       if (!ok) return;
     }
     try {
       const r = await api('POST', '/api/folders/archive', { path, archived });
-      toast(archived ? 'Archived ' + r.path + (r.todos ? ' with ' + plural(r.todos, 'todo') : '') : r.parentArchived ? 'Unarchived, but a parent folder is still archived' : 'Unarchived ' + r.path);
+      toast(archived ? 'Archived ' + r.path + (r.todos ? ' with ' + plural(r.todos, 'todo') : '') : (r.parentArchived ? 'Unarchived, but a parent folder is still archived' : 'Unarchived ' + r.path + (r.todos ? ', ' + plural(r.todos, 'todo') + ' back' : '')) + (r.overdue ? ', ' + r.overdue + ' overdue' : '') + (r.plansCleared ? ', ' + plural(r.plansCleared, 'stale plan') + ' cleared' : ''), 6000);
       await loadMeta();
       go(archived ? '#/archived' : folderHash(r.path));
     } catch (err) { toast(err.message, 4000); }
@@ -667,6 +678,10 @@
     } else if (inCompleted()) {
       html += '<button class="btn sm" data-bulk="reopen" title="Mark the selected todos open again">Reopen</button>';
       html += '<button class="btn sm ghost danger" data-bulk="trash" title="Move the selected todos to the trash">Delete</button>';
+    } else if (inArchived() || inArchivedFolder()) {
+      html += '<button class="btn sm primary" data-bulk="move" title="Move the selected todos to a live folder">Move to folder</button>';
+      html += '<button class="btn sm" data-bulk="complete" title="Mark the selected todos done">Complete</button>';
+      html += '<button class="btn sm ghost danger" data-bulk="trash" title="Move the selected todos to the trash">Delete</button>';
     } else {
       html += '<button class="btn sm primary" data-bulk="complete" title="Mark the selected todos done">Complete</button>';
       html += '<button class="btn sm" data-bulk="defer" title="Plan the selected todos for a later day">Defer</button>';
@@ -696,9 +711,10 @@
       const ok = await dialog({ input: false, danger: true, ok: 'Delete forever', title: 'Delete ' + plural(n, 'todo') + ' permanently?', message: 'This cannot be undone.' });
       if (!ok) return;
     } else if (op === 'defer') {
-      const until = await deferMenu(button, null);
-      if (!until) return;
-      body.until = until;
+      const choice = await deferMenu(button, null);
+      if (!choice) return;
+      body.until = choice.until;
+      body.moveDeadline = choice.moveDeadline;
     }
     if (button) button.disabled = true;
     try {
@@ -767,9 +783,10 @@
   // ---- rows and cards
   function badges(t) {
     let html = '';
+    if (t.deferCount > 0 && !t.completedAt && !t.deletedAt) html += ' <span class="badge" title="Deferred ' + (t.deferCount === 1 ? 'once' : t.deferCount + ' times') + ', last ' + rel(t.deferredAt) + '">deferred' + (t.deferCount > 1 ? ' &times;' + t.deferCount : '') + '</span>';
     if (t.status === 'waiting' && !t.completedAt) html += ' <span class="badge warn" title="' + (t.waitingFor ? 'Waiting for ' + esc(t.waitingFor) : 'Waiting') + '">waiting</span>';
     if (t.status === 'someday' && !t.completedAt) html += ' <span class="badge">someday</span>';
-    if (t.recurrence) html += ' <span class="badge" title="Repeats ' + esc(t.recurrence) + '">' + esc(t.recurrence) + '</span>';
+    if (t.recurrence) html += ' <span class="badge" title="Repeats ' + esc(t.recurrence) + (t.next ? ', next ' + esc(nextLabel(t)) : '') + '">' + esc(t.recurrence) + '</span>';
     if (t.reminder && t.reminder.enabled === false && t.dueAt) html += ' <span class="badge" title="No deadline notification for this todo">muted</span>';
     return html;
   }
@@ -796,8 +813,9 @@
 
   function rowActions(t) {
     if (inTrash()) return '<div class="acts"><button class="btn sm primary" data-restore title="Bring this todo back">Restore</button><button class="btn sm ghost danger" data-purge title="Remove permanently (click twice)">Delete forever</button></div>';
+    if (t.archived) return '<div class="acts">' + (t.completedAt ? '<button class="btn sm" data-reopen title="Mark open again">Reopen</button>' : '<button class="btn sm" data-edit title="Edit (E)">Edit</button>') + '<button class="btn sm ghost" data-move title="Move this todo to a live folder">Move</button><button class="btn sm ghost danger" data-del title="Move to the trash (click twice)">Delete</button></div>';
     if (t.completedAt) return '<div class="acts"><button class="btn sm" data-reopen title="Mark open again">Reopen</button><button class="btn sm ghost" data-edit title="Edit (E)">Edit</button><button class="btn sm ghost danger" data-del title="Move to the trash (click twice)">Delete</button></div>';
-    return '<div class="acts"><button class="btn sm" data-edit title="Edit (E)">Edit</button><button class="btn sm ghost" data-defer title="Plan it for a later day (D)">Defer</button>' + (Number.isFinite(t.nowOrder) ? '<button class="btn sm ghost" data-unnow title="Take out of Now">Unfocus</button>' : '<button class="btn sm ghost" data-now title="Add to Now">Now</button>') + '<button class="btn sm ghost danger" data-del title="Move to the trash (click twice)">Delete</button></div>';
+    return '<div class="acts"><button class="btn sm" data-edit title="Edit (E)">Edit</button><button class="btn sm ghost" data-defer title="Plan it for a later day (D)">Defer</button>' + (t.recurrence ? '<button class="btn sm ghost" data-skip title="Skip this occurrence' + (t.next ? ', next ' + esc(nextLabel(t)) : '') + '">Skip</button>' : '') + (Number.isFinite(t.nowOrder) ? '<button class="btn sm ghost" data-unnow title="Take out of Now">Unfocus</button>' : '<button class="btn sm ghost" data-now title="Add to Now">Now</button>') + '<button class="btn sm ghost danger" data-del title="Move to the trash (click twice)">Delete</button></div>';
   }
 
   const pickBox = (t) => '<span class="pick" data-pick role="checkbox" aria-checked="' + state.sel.has(t.id) + '" title="Select (X). Shift+click selects a range"></span>';
@@ -843,8 +861,17 @@
           '</div></div>';
       }).join('') + '</div>';
     } else {
+      const grouped = r.view === 'archived' && !r.folder;
+      let lastFolder = null;
       c.innerHTML = quickHtml() + '<div class="list">' + state.results.map((t, i) => {
-        return '<div class="row' + (i === state.selected ? ' selected' : '') + (state.sel.has(t.id) ? ' picked' : '') + (t.completedAt ? ' completed' : '') + '" data-i="' + i + '" data-id="' + esc(t.id) + '" draggable="' + (trash ? 'false' : 'true') + '">' + pickBox(t) + doneBox(t) +
+        let head = '';
+        if (grouped && (t.folder || '') !== lastFolder) {
+          lastFolder = t.folder || '';
+          const node = state.meta && state.meta.folders.find((f) => f.path.toLowerCase() === lastFolder.toLowerCase());
+          const root = state.meta && state.meta.folders.filter((f) => f.archivedHere && folderSegments(lastFolder).join('/').toLowerCase().startsWith(f.path.toLowerCase())).sort((x, y) => y.path.length - x.path.length)[0];
+          head = '<div class="group-head"><a class="fpath" href="' + folderHash(lastFolder) + '">' + FOLDER_ICO + '<span class="fl">' + esc(lastFolder) + '</span></a>' + (root && root.archivedAt ? '<span class="muted small">archived ' + esc(rel(root.archivedAt)) + '</span>' : '') + (node ? '<span class="muted small">' + plural(node.total, 'todo') + '</span>' : '') + '</div>';
+        }
+        return head + '<div class="row' + (i === state.selected ? ' selected' : '') + (state.sel.has(t.id) ? ' picked' : '') + (t.completedAt ? ' completed' : '') + '" data-i="' + i + '" data-id="' + esc(t.id) + '" draggable="' + (trash ? 'false' : 'true') + '">' + pickBox(t) + doneBox(t) +
           '<div class="main"><div class="title">' + titleHtml(t, terms) + badges(t) + '</div>' +
           (firstLine(t.notes) ? '<div class="desc" title="' + esc(firstLine(t.notes)) + '">' + hl(firstLine(t.notes), terms) + '</div>' : '') +
           '<div class="sub">' + subLine(t, terms) + '</div></div>' +
@@ -915,6 +942,8 @@
     if (e.target.closest('[data-edit]')) { openDrawer(t); return; }
     if (e.target.closest('[data-reopen]')) { toggleDone(t); return; }
     if (e.target.closest('[data-defer]')) { deferTodo(t, e.target.closest('[data-defer]')); return; }
+    if (e.target.closest('[data-move]')) { moveOne(t); return; }
+    if (e.target.closest('[data-skip]')) { skipOne(t); return; }
     if (e.target.closest('[data-now]')) { setNow(t, true); return; }
     if (e.target.closest('[data-unnow]')) { setNow(t, false); return; }
     const del = e.target.closest('[data-del]');
@@ -938,8 +967,8 @@
     try {
       const r = await api('POST', '/api/todos/' + t.id + '/' + (completing ? 'complete' : 'reopen'));
       replaceResult(r.todo);
-      if (completing) toast('Completed "' + t.title + '"' + (t.recurrence ? ', next one filed' : ''), 6000, { label: 'Undo', onClick: () => api('POST', '/api/todos/' + t.id + '/reopen').then(refreshAll).catch((err) => toast(err.message, 4000)) });
-      else toast('Reopened');
+      if (completing) toast('Completed "' + t.title + '"' + (t.recurrence ? ', next one filed' : ''), 6000, { label: 'Undo', onClick: () => api('POST', '/api/todos/' + t.id + '/reopen').then((u) => { if (u.removedNext) toast('Reopened, the next occurrence was taken back'); return refreshAll(); }).catch((err) => toast(err.message, 4000)) });
+      else toast(r.removedNext ? 'Reopened, the next occurrence was taken back' : 'Reopened');
       await refreshAll();
     } catch (err) { toast(err.message, 4000); }
   }
@@ -953,8 +982,11 @@
       menu.className = 'popmenu';
       menu.setAttribute('role', 'menu');
       const dueDay = todo && todo.dueAt ? dayKey(new Date(todo.dueAt)) : null;
+      const overdue = dueDay && dueDay < dayKey();
       const items = [['tomorrow', 'Tomorrow', shiftDay(1)], ['week', 'Next week', shiftDay(7)], ['pick', 'Pick a date', null]];
-      menu.innerHTML = items.map(([v, label, day]) => '<button type="button" class="popitem" data-v="' + v + '"' + (dueDay && day && day > dueDay ? ' disabled title="After the deadline"' : '') + '>' + label + (day ? '<span class="n">' + esc(dayLabel(day)) + '</span>' : '') + '</button>').join('');
+      // Past the deadline the option is still offered, but says plainly that it moves the deadline too.
+      menu.innerHTML = (overdue ? '<div class="popnote">Overdue since ' + esc(dayLabel(dueDay)) + ': deferring moves the deadline</div>' : '') +
+        items.map(([v, label, day]) => { const moves = dueDay && day && day > dueDay; return '<button type="button" class="popitem" data-v="' + v + '" data-moves="' + (moves ? '1' : '') + '" title="' + (moves ? 'Also moves the deadline to ' + esc(dayLabel(day)) : '') + '">' + label + (moves ? ' <span class="badge warn">moves deadline</span>' : '') + (day ? '<span class="n">' + esc(dayLabel(day)) + '</span>' : '') + '</button>'; }).join('');
       document.body.appendChild(menu);
       const r = anchor ? anchor.getBoundingClientRect() : { left: window.innerWidth / 2 - 90, bottom: window.innerHeight / 2 };
       menu.style.left = Math.max(8, Math.min(window.innerWidth - menu.offsetWidth - 8, r.left)) + 'px';
@@ -967,10 +999,16 @@
       menu.onclick = async (e) => {
         const b = e.target.closest('[data-v]');
         if (!b || b.disabled) return;
-        if (b.dataset.v !== 'pick') return done(b.dataset.v);
+        if (b.dataset.v !== 'pick') return done({ until: b.dataset.v, moveDeadline: b.dataset.moves === '1' });
         menu.remove(); document.removeEventListener('mousedown', outside, true); document.removeEventListener('keydown', keys, true);
-        const day = await dialog({ title: 'Defer until', type: 'date', value: shiftDay(2), ok: 'Defer', help: dueDay ? 'The deadline is ' + esc(dayLabel(dueDay)) + '; the planned day has to be on or before it.' : 'The todo shows in Today on that day.' });
-        resolve(day || null);
+        const day = await dialog({ title: 'Defer until', type: 'date', value: shiftDay(2), ok: 'Defer', help: dueDay ? 'The deadline is ' + esc(dayLabel(dueDay)) + '. A later day moves the deadline too; you are asked first.' : 'The todo shows in Today on that day.' });
+        if (!day) return resolve(null);
+        if (dueDay && day > dueDay) {
+          const ok = await dialog({ input: false, ok: 'Move both', title: 'Move the deadline too?', message: 'The deadline is <b>' + esc(dayLabel(dueDay)) + '</b>. Deferring to <b>' + esc(dayLabel(day)) + '</b> moves the deadline to that day as well, keeping its time.' + (todo && todo.recurrence ? ' Only this occurrence moves; the repeat cadence stays.' : '') });
+          if (!ok) return resolve(null);
+          return resolve({ until: day, moveDeadline: true });
+        }
+        resolve({ until: day, moveDeadline: false });
       };
       const first = menu.querySelector('.popitem:not([disabled])');
       if (first) first.focus();
@@ -978,13 +1016,35 @@
   }
 
   async function deferTodo(t, anchor) {
-    const until = await deferMenu(anchor, t);
-    if (!until) return;
-    const before = { plannedDate: t.plannedDate || null, nowOrder: Number.isFinite(t.nowOrder) ? t.nowOrder : null, status: t.status };
+    const choice = await deferMenu(anchor, t);
+    if (!choice) return;
+    const before = { plannedDate: t.plannedDate || null, dueAt: t.dueAt || null, nowOrder: Number.isFinite(t.nowOrder) ? t.nowOrder : null, status: t.status, deferCount: t.deferCount || 0, deferredAt: t.deferredAt || null, repeatAnchor: t.repeatAnchor == null ? null : t.repeatAnchor };
     try {
-      const r = await api('POST', '/api/todos/' + t.id + '/defer', { until });
+      const r = await api('POST', '/api/todos/' + t.id + '/defer', choice);
       replaceResult(r.todo);
-      toast('Deferred to ' + dayLabel(r.todo.plannedDate), 6000, { label: 'Undo', onClick: () => api('PUT', '/api/todos/' + t.id, before).then(refreshAll).catch((err) => toast(err.message, 4000)) });
+      toast('Deferred to ' + dayLabel(r.todo.plannedDate) + (choice.moveDeadline ? ', deadline moved' : ''), 6000, { label: 'Undo', onClick: () => api('PUT', '/api/todos/' + t.id, before).then(refreshAll).catch((err) => toast(err.message, 4000)) });
+      await refreshAll();
+    } catch (err) { toast(err.message, 4000); }
+  }
+
+  async function skipOne(t) {
+    const before = { dueAt: t.dueAt || null, plannedDate: t.plannedDate || null, nowOrder: Number.isFinite(t.nowOrder) ? t.nowOrder : null, skipCount: t.skipCount || 0, repeatAnchor: t.repeatAnchor == null ? null : t.repeatAnchor };
+    try {
+      const r = await api('POST', '/api/todos/' + t.id + '/skip');
+      replaceResult(r.todo);
+      toast('Skipped to ' + nextLabelOf(r.todo), 6000, { label: 'Undo', onClick: () => api('PUT', '/api/todos/' + t.id, before).then(refreshAll).catch((err) => toast(err.message, 4000)) });
+      await refreshAll();
+    } catch (err) { toast(err.message, 4000); }
+  }
+  const nextLabelOf = (t) => (t.dueAt ? dueLabel(t) : dayLabel(t.plannedDate));
+
+  async function moveOne(t) {
+    const folder = await dialog({ title: 'Move "' + t.title + '" to', value: '', placeholder: 'People/Alice', ok: 'Move', list: folderPaths(), help: 'A live folder brings the todo back into its views. Leave the field empty to make it unfiled.', allowEmpty: true });
+    if (folder == null) return;
+    try {
+      const r = await api('PUT', '/api/todos/' + t.id, { folder });
+      replaceResult(r.todo);
+      toast(folder ? 'Moved to ' + folder : 'Moved out of its folder');
       await refreshAll();
     } catch (err) { toast(err.message, 4000); }
   }
@@ -1165,7 +1225,7 @@
       if (e.key === ' ') { e.preventDefault(); const t = selectedTodo(); if (t && !t.deletedAt) toggleDone(t); }
       else if (e.key === 'e') { e.preventDefault(); const t = selectedTodo(); if (t) openDrawer(t); }
       else if (e.key === 'x') { e.preventDefault(); if (state.results.length) togglePick(state.selected, e.shiftKey); }
-      else if (e.key === 'd') { e.preventDefault(); const t = selectedTodo(); if (t && !t.completedAt && !t.deletedAt) deferTodo(t, $('[data-i="' + state.selected + '"] [data-defer]')); }
+      else if (e.key === 'd') { e.preventDefault(); const t = selectedTodo(); if (t && !t.completedAt && !t.deletedAt && !t.archived) deferTodo(t, $('[data-i="' + state.selected + '"] [data-defer]')); }
       else if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
       else if (e.key === 'l') { state.layout = state.layout === 'list' ? 'grid' : 'list'; try { localStorage.setItem('todonow.layout', state.layout); } catch { /* ignore */ } renderResults(); renderToolbar(); }
       else if (e.key === 'n' && canAdd()) { e.preventDefault(); openDrawer(null); }
@@ -1212,6 +1272,9 @@
       (trashed ? '<div class="alert warn">In the trash since ' + rel(t.deletedAt) + '. Restore it to edit; it is removed for good after ' + (state.meta ? state.meta.settings.trashDays || 30 : 30) + ' days.</div>' : '') +
       (t.completedAt && !trashed ? '<div class="alert ok">Completed ' + rel(t.completedAt) + '. Reopen it to work on it again.</div>' : '') +
       (t.overdue && !t.completedAt && !trashed ? '<div class="alert error">Overdue: was due ' + esc(dueLabel(t)) + '.</div>' : '') +
+      (t.archived && !trashed ? '<div class="alert warn">In the archived folder <b>' + esc(t.folder) + '</b>, so it stays out of every view and reminder. <a href="' + folderHash(t.folder) + '">Open the folder</a> to unarchive it, or pick a live folder below to bring this todo back on its own.</div>' : '') +
+      (t.recurrence && !trashed ? '<div class="alert" id="dSeries">Repeats ' + esc(t.recurrence) + (t.next ? ', next ' + esc(nextLabel(t)) : '') + '.</div>' : '') +
+      (t.deferCount > 0 && !t.completedAt && !trashed ? '<div class="alert">Deferred ' + (t.deferCount === 1 ? 'once' : t.deferCount + ' times') + ', last ' + rel(t.deferredAt) + '.</div>' : '') +
       '<div class="field">' + lbl('Title', 'title') + '<input type="text" id="fTitle" value="' + esc(t.title) + '" placeholder="What needs doing?"></div>' +
       '<div class="field">' + lbl('Folder', 'folder') + '<div id="fFolder"></div><div class="help">Pick from the tree or type a new path with <code>/</code></div></div>' +
       '<div class="field">' + lbl('Link', 'url') + '<input type="url" id="fUrl" value="' + esc(t.url || '') + '" placeholder="https://">' + (t.url ? '<div class="help"><a href="' + esc(t.url) + '" target="_blank" rel="noopener">Open ' + esc(host(t.url)) + '</a></div>' : '') + '</div>' +
@@ -1221,16 +1284,16 @@
       '<div class="field">' + lbl('Waiting for', 'waiting') + '<input type="text" id="fWaiting" value="' + esc(t.waitingFor || '') + '" placeholder="Person or event"></div></div>' +
       '<div class="row2"><div class="field">' + lbl('Priority', 'priority') + '<select id="fPriority">' + opt('none', 'None', t.priority) + opt('low', 'Low', t.priority) + opt('medium', 'Medium', t.priority) + opt('high', 'High', t.priority) + '</select></div>' +
       '<div class="field">' + lbl('Estimate', 'estimate') + '<select id="fEstimate">' + opt('', 'None', t.estimateMinutes || '') + opt('5', '5 minutes', t.estimateMinutes) + opt('15', '15 minutes', t.estimateMinutes) + opt('30', '30 minutes', t.estimateMinutes) + opt('60', '1 hour', t.estimateMinutes) + opt('120', '2 hours', t.estimateMinutes) + opt('240', 'Half a day', t.estimateMinutes) + '</select></div></div>' +
-      '<div class="row2"><div class="field">' + lbl('Repeat', 'repeat') + '<select id="fRepeat">' + opt('', 'Never', t.recurrence || '') + opt('daily', 'Daily', t.recurrence) + opt('weekdays', 'Weekdays', t.recurrence) + opt('weekly', 'Weekly', t.recurrence) + opt('monthly', 'Monthly', t.recurrence) + '</select></div>' +
+      '<div class="row2"><div class="field">' + lbl('Repeat', 'repeat') + '<select id="fRepeat">' + opt('', 'Never', t.recurrence || '') + opt('daily', 'Daily', t.recurrence) + opt('weekdays', 'Weekdays', t.recurrence) + opt('weekly', 'Weekly', t.recurrence) + opt('monthly', 'Monthly', t.recurrence) + opt('yearly', 'Yearly', t.recurrence) + '</select>' + (t.next ? '<div class="help">Next: ' + esc(nextLabel(t)) + (t.skipCount ? ', skipped ' + (t.skipCount === 1 ? 'once' : t.skipCount + ' times') : '') + '</div>' : '') + '</div>' +
       '<div class="field">' + lbl('Reminder', 'reminder') + '<select id="fReminder">' + opt('default', 'Use default', reminderValue(t)) + opt('0', 'At the deadline', reminderValue(t)) + opt('15', '15 minutes before', reminderValue(t)) + opt('60', '1 hour before', reminderValue(t)) + opt('1440', '1 day before', reminderValue(t)) + opt('off', 'Off', reminderValue(t)) + '</select></div></div>' +
-      '<div class="field checks"><label><input type="checkbox" id="fNow"' + (Number.isFinite(t.nowOrder) ? ' checked' : '') + '> In Now, my current focus queue<span class="info" tabindex="0" data-tip="' + esc(TIPS.now) + '">i</span></label></div>' +
+      (t.archived ? '<input type="checkbox" id="fNow" class="hidden">' : '<div class="field checks"><label><input type="checkbox" id="fNow"' + (Number.isFinite(t.nowOrder) ? ' checked' : '') + '> In Now, my current focus queue<span class="info" tabindex="0" data-tip="' + esc(TIPS.now) + '">i</span></label></div>') +
       '<div class="field">' + lbl('Tags', 'tags') + '<div id="fTags"></div></div>' +
       '<div class="field">' + lbl('Notes', 'notes') + '<textarea id="fNotes" placeholder="Context, links, next steps">' + esc(t.notes || '') + '</textarea></div>' +
       (isNew ? '' : '<div class="stats"><span>Added <b>' + rel(t.createdAt) + '</b></span><span>Updated <b>' + rel(t.updatedAt) + '</b></span>' + (t.completedAt ? '<span>Completed <b>' + rel(t.completedAt) + '</b></span>' : '') + (t.reminder && t.reminder.snoozedUntil && Date.parse(t.reminder.snoozedUntil) > Date.now() ? '<span>Reminder snoozed until <b>' + esc(timeLabel(t.reminder.snoozedUntil)) + '</b></span>' : '') + '<span>Id <b>' + esc(t.id) + '</b></span></div>') +
       '</div>' +
       (trashed
         ? '<div class="drawer-foot"><button class="btn primary" id="dRestore">Restore</button><button class="btn" id="dClose2">Close</button><span class="grow"></span><button class="btn danger" id="dDelete">Delete forever</button></div>'
-        : '<div class="drawer-foot"><button class="btn primary" id="dSave">' + (isNew ? 'Add todo' : 'Save') + ' <kbd>&#8984;S</kbd></button><button class="btn" id="dClose2">Cancel</button><span class="grow"></span>' + (isNew ? '' : (t.dueAt && !t.completedAt ? '<button class="btn ghost" id="dSnooze" title="Hold the deadline notification for an hour">Snooze 1h</button>' : '') + '<button class="btn danger" id="dDelete">Delete</button>') + '</div>');
+        : '<div class="drawer-foot"><button class="btn primary" id="dSave">' + (isNew ? 'Add todo' : 'Save') + ' <kbd>&#8984;S</kbd></button><button class="btn" id="dClose2">Cancel</button><span class="grow"></span>' + (isNew ? '' : (t.recurrence && !t.completedAt && !t.archived ? '<button class="btn ghost" id="dSkip" title="Skip this occurrence' + (t.next ? ', next ' + esc(nextLabel(t)) : '') + '">Skip</button>' : '') + (t.dueAt && !t.completedAt ? '<button class="btn ghost" id="dSnooze" title="Hold the deadline notification for an hour">Snooze 1h</button>' : '') + '<button class="btn danger" id="dDelete">Delete</button>') + '</div>');
     d.classList.add('open');
     d.setAttribute('aria-hidden', 'false');
     if (trashed) $$('#drawer input, #drawer textarea, #drawer select').forEach((el) => { el.disabled = true; });
@@ -1252,6 +1315,9 @@
     if (dd) dd.onclick = async () => { closeDrawer(); await toggleDone(t); };
     const dr = $('#dRestore');
     if (dr) dr.onclick = async () => { closeDrawer(); await restoreOne(t); };
+    const sk = $('#dSkip');
+    if (sk) sk.onclick = async () => { closeDrawer(); await skipOne(t); };
+    if (t.seriesId && !isNew) api('GET', '/api/todos/' + t.id).then((r) => { const el = $('#dSeries'); if (el && r.series && state.editing && state.editing.id === t.id) el.innerHTML += ' This series: ' + plural(r.series.done, 'occurrence') + ' done' + (r.series.total > r.series.done ? ', ' + (r.series.total - r.series.done) + ' open' : '') + '.'; }).catch(() => { /* optional */ });
     const sn = $('#dSnooze');
     if (sn) sn.onclick = async () => {
       try { await api('POST', '/api/todos/' + t.id + '/snooze', { minutes: 60 }); toast('Deadline notification snoozed for an hour'); closeDrawer(); await refreshAll(); } catch (err) { toast(err.message, 4000); }
@@ -1301,6 +1367,7 @@
     if (!t || t.deletedAt || !$('#fTitle')) return;
     const body = drawerBody();
     if (!body.title.trim()) { $('#fTitle').focus(); toast('A title is needed', 2500); return; }
+    if (body.recurrence && !body.dueAt && !body.plannedDate) { $('#fPlanned').focus(); toast('A repeating todo needs a deadline or a planned day', 3500); return; }
     const isNew = !t.id;
     try {
       const r = isNew ? await api('POST', '/api/todos', body) : await api('PUT', '/api/todos/' + t.id, body);
